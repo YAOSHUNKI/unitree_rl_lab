@@ -17,6 +17,7 @@ from list_envs import import_packages  # noqa: F401
 
 sys.path.pop(0)
 
+
 tasks = []
 for task_spec in gym.registry.values():
     if "Unitree" in task_spec.id and "Isaac" not in task_spec.id:
