@@ -1,3 +1,6 @@
+import os
+UNITREE_MODEL_DIR = os.environ.get("UNITREE_MODEL_DIR", os.path.expanduser("~/unitree_model"))
+
 # Copyright (c) 2022-2025, The Isaac Lab Project Developers.
 # All rights reserved.
 #
@@ -17,7 +20,7 @@ from isaaclab.utils import configclass
 
 from unitree_rl_lab.assets.robots import unitree_actuators
 
-UNITREE_MODEL_DIR = "/home/shunki/unitree_model"  # Replace with the actual path to your unitree_model directory
+UNITREE_MODEL_DIR = f"{UNITREE_MODEL_DIR}"  # Replace with the actual path to your unitree_model directory
 UNITREE_ROS_DIR = "/home/shunki/unitree_ros/unitree_ros"  # Replace with the actual path to your unitree_ros package
 
 
