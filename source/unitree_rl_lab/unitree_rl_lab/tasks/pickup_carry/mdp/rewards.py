@@ -1,0 +1,291 @@
+"""Reward terms for the pickup-and-carry task.
+
+Behaviour is broken into staged phases and rewards for later phases only
+fire when earlier-phase preconditions are satisfied, so the agent cannot
+farm reward out of context (e.g. squatting in the middle of the arena).
+
+Phases:
+  1. Approach the box (walk toward it)
+  2. Face the box
+  3. Squat when near the box
+  4. Bring both hands close to / in contact with the box
+  5. Grasp the box (both hands touching, close to center)
+  6. Lift the box / stand back up while grasped
+  7. Carry the box while tracking a base-velocity command
+"""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+import torch
+
+from isaaclab.assets import Articulation, RigidObject
+from isaaclab.managers import SceneEntityCfg
+from isaaclab.sensors import ContactSensor
+from isaaclab.utils.math import quat_rotate_inverse, yaw_quat
+
+if TYPE_CHECKING:
+    from isaaclab.envs import ManagerBasedRLEnv
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _box_relative_xy(
+    env: "ManagerBasedRLEnv",
+    object_cfg: SceneEntityCfg,
+    robot_cfg: SceneEntityCfg,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    box: RigidObject = env.scene[object_cfg.name]
+    robot: Articulation = env.scene[robot_cfg.name]
+    rel_w = box.data.root_pos_w - robot.data.root_pos_w
+    rel_b = quat_rotate_inverse(yaw_quat(robot.data.root_quat_w), rel_w)
+    return rel_b[:, 0], rel_b[:, 1]
+
+
+def _hand_positions_w(
+    env: "ManagerBasedRLEnv",
+    robot_cfg: SceneEntityCfg,
+    hand_body_names: list[str],
+) -> torch.Tensor:
+    robot: Articulation = env.scene[robot_cfg.name]
+    body_ids, _ = robot.find_bodies(list(hand_body_names))
+    return robot.data.body_pos_w[:, body_ids, :]  # (N, K, 3)
+
+
+def is_grasped(
+    env: "ManagerBasedRLEnv",
+    object_cfg: SceneEntityCfg,
+    robot_cfg: SceneEntityCfg,
+    hand_body_names: list[str],
+    contact_sensor_name: str,
+    grasp_dist: float = 0.18,
+    force_threshold: float = 1.0,
+) -> torch.Tensor:
+    """0/1 tensor: both hands close to box AND both hands in contact."""
+    box: RigidObject = env.scene[object_cfg.name]
+    hands_w = _hand_positions_w(env, robot_cfg, list(hand_body_names))
+    d = torch.linalg.norm(hands_w - box.data.root_pos_w.unsqueeze(1), dim=-1)
+    both_near = (d < grasp_dist).all(dim=-1)
+
+    cs: ContactSensor = env.scene.sensors[contact_sensor_name]
+    forces = torch.linalg.norm(cs.data.net_forces_w[:, :, :], dim=-1)
+    both_touch = (forces > force_threshold).sum(dim=-1) >= 2
+    return (both_near & both_touch).float()
+
+
+# ---------------------------------------------------------------------------
+# Phase 1: approach
+# ---------------------------------------------------------------------------
+
+
+def approach_box(
+    env: "ManagerBasedRLEnv",
+    target_distance: float = 0.55,
+    std: float = 0.35,
+    object_cfg: SceneEntityCfg = SceneEntityCfg("box"),
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    dx, dy = _box_relative_xy(env, object_cfg, robot_cfg)
+    dist = torch.sqrt(dx * dx + dy * dy + 1e-8)
+    err = dist - target_distance
+    return torch.exp(-(err * err) / (std * std))
+
+
+# ---------------------------------------------------------------------------
+# Phase 2: face
+# ---------------------------------------------------------------------------
+
+
+def face_box(
+    env: "ManagerBasedRLEnv",
+    object_cfg: SceneEntityCfg = SceneEntityCfg("box"),
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    dx, dy = _box_relative_xy(env, object_cfg, robot_cfg)
+    dist = torch.sqrt(dx * dx + dy * dy + 1e-8)
+    return dx / dist  # cos(theta) — 1 when facing the box
+
+
+# ---------------------------------------------------------------------------
+# Phase 3: squat
+# ---------------------------------------------------------------------------
+
+
+def squat_when_near_box(
+    env: "ManagerBasedRLEnv",
+    target_height: float = 0.50,
+    near_threshold: float = 0.75,
+    std: float = 0.10,
+    object_cfg: SceneEntityCfg = SceneEntityCfg("box"),
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    robot: Articulation = env.scene[robot_cfg.name]
+    dx, dy = _box_relative_xy(env, object_cfg, robot_cfg)
+    dist = torch.sqrt(dx * dx + dy * dy + 1e-8)
+    near = (dist < near_threshold).float()
+
+    h = robot.data.root_pos_w[:, 2]
+    err = h - target_height
+    return near * torch.exp(-(err * err) / (std * std))
+
+
+def hold_still_when_squatting(
+    env: "ManagerBasedRLEnv",
+    near_threshold: float = 0.75,
+    object_cfg: SceneEntityCfg = SceneEntityCfg("box"),
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    robot: Articulation = env.scene[robot_cfg.name]
+    dx, dy = _box_relative_xy(env, object_cfg, robot_cfg)
+    dist = torch.sqrt(dx * dx + dy * dy + 1e-8)
+    near = (dist < near_threshold).float()
+
+    lin_speed = torch.linalg.norm(robot.data.root_lin_vel_b[:, :2], dim=-1)
+    ang_speed = torch.abs(robot.data.root_ang_vel_b[:, 2])
+    return -near * (lin_speed + 0.5 * ang_speed)
+
+
+# ---------------------------------------------------------------------------
+# Phase 4: hands to box
+# ---------------------------------------------------------------------------
+
+
+def hands_near_box(
+    env: "ManagerBasedRLEnv",
+    std: float = 0.15,
+    hand_body_names: list[str] = ("left_wrist_yaw_link", "right_wrist_yaw_link"),
+    near_threshold: float = 0.75,
+    object_cfg: SceneEntityCfg = SceneEntityCfg("box"),
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Gaussian on mean(hand→box distance), gated by base-to-box proximity."""
+    box: RigidObject = env.scene[object_cfg.name]
+    dx, dy = _box_relative_xy(env, object_cfg, robot_cfg)
+    dist_base = torch.sqrt(dx * dx + dy * dy + 1e-8)
+    near = (dist_base < near_threshold).float()
+
+    hands_w = _hand_positions_w(env, robot_cfg, list(hand_body_names))
+    d = torch.linalg.norm(hands_w - box.data.root_pos_w.unsqueeze(1), dim=-1)
+    score = torch.exp(-(d * d) / (std * std)).mean(dim=-1)
+    return near * score
+
+
+def hands_contact_box(
+    env: "ManagerBasedRLEnv",
+    sensor_cfg: SceneEntityCfg = SceneEntityCfg("hand_contact", body_names=[".*_wrist_yaw_link"]),
+    force_threshold: float = 1.0,
+) -> torch.Tensor:
+    """0 / 0.3 / 1.0 depending on how many hands are in contact."""
+    cs: ContactSensor = env.scene.sensors[sensor_cfg.name]
+    forces = torch.linalg.norm(cs.data.net_forces_w[:, sensor_cfg.body_ids, :], dim=-1)
+    hit = (forces > force_threshold).float()
+    both = (hit.sum(dim=-1) >= 2).float()
+    any_ = (hit.sum(dim=-1) >= 1).float()
+    return 0.3 * (any_ - both) + 1.0 * both
+
+
+# ---------------------------------------------------------------------------
+# Phase 5: grasp
+# ---------------------------------------------------------------------------
+
+
+def grasp_bonus(
+    env: "ManagerBasedRLEnv",
+    hand_body_names: list[str] = ("left_wrist_yaw_link", "right_wrist_yaw_link"),
+    contact_sensor_name: str = "hand_contact",
+    grasp_dist: float = 0.18,
+    object_cfg: SceneEntityCfg = SceneEntityCfg("box"),
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    return is_grasped(env, object_cfg, robot_cfg, list(hand_body_names), contact_sensor_name, grasp_dist)
+
+
+# ---------------------------------------------------------------------------
+# Phase 6: lift / stand up while grasped
+# ---------------------------------------------------------------------------
+
+
+def lift_box(
+    env: "ManagerBasedRLEnv",
+    initial_z: float = 0.1,
+    target_lift: float = 0.4,
+    std: float = 0.12,
+    hand_body_names: list[str] = ("left_wrist_yaw_link", "right_wrist_yaw_link"),
+    contact_sensor_name: str = "hand_contact",
+    object_cfg: SceneEntityCfg = SceneEntityCfg("box"),
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    box: RigidObject = env.scene[object_cfg.name]
+    lifted = box.data.root_pos_w[:, 2] - initial_z
+    err = lifted - target_lift
+    gauss = torch.exp(-(err * err) / (std * std))
+    gated = is_grasped(env, object_cfg, robot_cfg, list(hand_body_names), contact_sensor_name)
+    return gated * gauss
+
+
+def stand_up_when_lifting(
+    env: "ManagerBasedRLEnv",
+    stand_height: float = 0.75,
+    std: float = 0.10,
+    hand_body_names: list[str] = ("left_wrist_yaw_link", "right_wrist_yaw_link"),
+    contact_sensor_name: str = "hand_contact",
+    object_cfg: SceneEntityCfg = SceneEntityCfg("box"),
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    robot: Articulation = env.scene[robot_cfg.name]
+    err = robot.data.root_pos_w[:, 2] - stand_height
+    gauss = torch.exp(-(err * err) / (std * std))
+    gated = is_grasped(env, object_cfg, robot_cfg, list(hand_body_names), contact_sensor_name)
+    return gated * gauss
+
+
+# ---------------------------------------------------------------------------
+# Phase 7: carry
+# ---------------------------------------------------------------------------
+
+
+def carry_box_velocity(
+    env: "ManagerBasedRLEnv",
+    command_name: str = "base_velocity",
+    std: float = 0.4,
+    hand_body_names: list[str] = ("left_wrist_yaw_link", "right_wrist_yaw_link"),
+    contact_sensor_name: str = "hand_contact",
+    object_cfg: SceneEntityCfg = SceneEntityCfg("box"),
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    robot: Articulation = env.scene[robot_cfg.name]
+    cmd = env.command_manager.get_command(command_name)[:, :2]
+    err = torch.linalg.norm(robot.data.root_lin_vel_b[:, :2] - cmd, dim=-1)
+    gauss = torch.exp(-(err * err) / (std * std))
+    gated = is_grasped(env, object_cfg, robot_cfg, list(hand_body_names), contact_sensor_name)
+    return gated * gauss
+
+
+# ---------------------------------------------------------------------------
+# Safety
+# ---------------------------------------------------------------------------
+
+
+def drop_box_penalty(
+    env: "ManagerBasedRLEnv",
+    min_z: float = 0.05,
+    object_cfg: SceneEntityCfg = SceneEntityCfg("box"),
+) -> torch.Tensor:
+    box: RigidObject = env.scene[object_cfg.name]
+    return (box.data.root_pos_w[:, 2] < min_z).float() * -1.0
+
+
+def box_collision_penalty(
+    env: "ManagerBasedRLEnv",
+    min_distance: float = 0.30,
+    object_cfg: SceneEntityCfg = SceneEntityCfg("box"),
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    dx, dy = _box_relative_xy(env, object_cfg, robot_cfg)
+    dist = torch.sqrt(dx * dx + dy * dy + 1e-8)
+    intrusion = (min_distance - dist).clamp(min=0.0)
+    return -intrusion
