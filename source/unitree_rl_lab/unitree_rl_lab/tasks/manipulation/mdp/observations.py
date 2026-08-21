@@ -20,7 +20,7 @@ import torch
 from isaaclab.assets import RigidObject
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.sensors import TiledCamera
-from isaaclab.utils.math import quat_rotate_inverse, yaw_quat
+from isaaclab.utils.math import quat_apply_inverse, yaw_quat
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
@@ -89,7 +89,7 @@ def box_position_in_base_frame(
     base_quat_w = robot.data.root_quat_w
 
     rel_w = box_pos_w - base_pos_w
-    rel_b = quat_rotate_inverse(yaw_quat(base_quat_w), rel_w)
+    rel_b = quat_apply_inverse(yaw_quat(base_quat_w), rel_w)
     return rel_b
 
 

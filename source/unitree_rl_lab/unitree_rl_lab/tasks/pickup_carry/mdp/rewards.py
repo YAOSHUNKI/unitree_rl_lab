@@ -23,7 +23,7 @@ import torch
 from isaaclab.assets import Articulation, RigidObject
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.sensors import ContactSensor
-from isaaclab.utils.math import quat_rotate_inverse, yaw_quat
+from isaaclab.utils.math import quat_apply_inverse, yaw_quat
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
@@ -42,7 +42,7 @@ def _box_relative_xy(
     box: RigidObject = env.scene[object_cfg.name]
     robot: Articulation = env.scene[robot_cfg.name]
     rel_w = box.data.root_pos_w - robot.data.root_pos_w
-    rel_b = quat_rotate_inverse(yaw_quat(robot.data.root_quat_w), rel_w)
+    rel_b = quat_apply_inverse(yaw_quat(robot.data.root_quat_w), rel_w)
     return rel_b[:, 0], rel_b[:, 1]
 
 
@@ -289,3 +289,82 @@ def box_collision_penalty(
     dist = torch.sqrt(dx * dx + dy * dy + 1e-8)
     intrusion = (min_distance - dist).clamp(min=0.0)
     return -intrusion
+
+# ---------------------------------------------------------------------------
+# Posture shaping: 
+# ---------------------------------------------------------------------------
+
+
+def hip_abduction_penalty(
+    env: "ManagerBasedRLEnv",
+    robot_cfg: SceneEntityCfg = SceneEntityCfg(
+        "robot",
+        joint_names=["left_hip_roll_joint", "right_hip_roll_joint"],
+    ),
+) -> torch.Tensor:
+    """hip_roll The further the hip abduction deviates from the neutral position (0), the greater the penalty."""
+    robot: Articulation = env.scene[robot_cfg.name]
+    q = robot.data.joint_pos[:, robot_cfg.joint_ids]
+    return -(q ** 2).sum(dim=-1)
+
+
+def feet_lateral_distance_penalty(
+    env: "ManagerBasedRLEnv",
+    max_stance_width: float = 0.30,
+    foot_body_names: list[str] = (".*_ankle_roll_link",),
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """A linear penalty is applied for the amount by which the distance between the left and right feet exceeds `max_stance_width`."""
+    robot: Articulation = env.scene[robot_cfg.name]
+    body_ids, _ = robot.find_bodies(list(foot_body_names))
+    feet_w = robot.data.body_pos_w[:, body_ids, :]  # (N, 2, 3)
+    rel = feet_w[:, 0, :] - feet_w[:, 1, :]
+    rel_b = quat_apply_inverse(yaw_quat(robot.data.root_quat_w), rel)
+    lateral = torch.abs(rel_b[:, 1])
+    excess = (lateral - max_stance_width).clamp(min=0.0)
+    return -excess
+
+
+def knee_flexion_when_squatting(
+    env: "ManagerBasedRLEnv",
+    target_knee_angle: float = 1.2,
+    std: float = 0.3,
+    near_threshold: float = 0.75,
+    robot_cfg: SceneEntityCfg = SceneEntityCfg(
+        "robot",
+        joint_names=["left_knee_joint", "right_knee_joint"],
+    ),
+    object_cfg: SceneEntityCfg = SceneEntityCfg("box"),
+) -> torch.Tensor:
+    """The higher the reward, the more your knee is bent toward the target_knee_angle when you're near the box."""
+    robot: Articulation = env.scene[robot_cfg.name]
+    dx, dy = _box_relative_xy(env, object_cfg, robot_cfg)
+    dist = torch.sqrt(dx * dx + dy * dy + 1e-8)
+    near = (dist < near_threshold).float()
+
+    q = robot.data.joint_pos[:, robot_cfg.joint_ids]
+    err = q.mean(dim=-1) - target_knee_angle
+    return near * torch.exp(-(err * err) / (std * std))
+
+
+def leg_symmetry_penalty(
+    env: "ManagerBasedRLEnv",
+    robot_cfg_roll: SceneEntityCfg = SceneEntityCfg(
+        "robot", joint_names=["left_hip_roll_joint", "right_hip_roll_joint"]
+    ),
+    robot_cfg_pitch: SceneEntityCfg = SceneEntityCfg(
+        "robot", joint_names=["left_hip_pitch_joint", "right_hip_pitch_joint"]
+    ),
+    robot_cfg_knee: SceneEntityCfg = SceneEntityCfg(
+        "robot", joint_names=["left_knee_joint", "right_knee_joint"]
+    ),
+) -> torch.Tensor:
+    """The more symmetrical the left and right ankle joints are, the better (= the square of the difference)"""
+    robot: Articulation = env.scene[robot_cfg_roll.name]
+    q_roll = robot.data.joint_pos[:, robot_cfg_roll.joint_ids]
+    q_pitch = robot.data.joint_pos[:, robot_cfg_pitch.joint_ids]
+    q_knee = robot.data.joint_pos[:, robot_cfg_knee.joint_ids]
+    d_roll = q_roll[:, 0] + q_roll[:, 1]         
+    d_pitch = q_pitch[:, 0] - q_pitch[:, 1]     
+    d_knee = q_knee[:, 0] - q_knee[:, 1]
+    return -(d_roll ** 2 + d_pitch ** 2 + d_knee ** 2)

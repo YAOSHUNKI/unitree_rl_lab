@@ -9,7 +9,7 @@ import torch
 from isaaclab.assets import RigidObject
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.sensors import ContactSensor
-from isaaclab.utils.math import quat_rotate_inverse, yaw_quat
+from isaaclab.utils.math import quat_apply_inverse, yaw_quat
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
@@ -30,7 +30,7 @@ def box_position_in_base_frame(
     robot = env.scene[robot_cfg.name]
 
     rel_w = box.data.root_pos_w - robot.data.root_pos_w
-    return quat_rotate_inverse(yaw_quat(robot.data.root_quat_w), rel_w)
+    return quat_apply_inverse(yaw_quat(robot.data.root_quat_w), rel_w)
 
 
 def box_distance_and_heading(
@@ -63,7 +63,7 @@ def hand_positions_in_base_frame(
     base_pos = robot.data.root_pos_w.unsqueeze(1)
     rel_w = hands_w - base_pos
     q = yaw_quat(robot.data.root_quat_w).unsqueeze(1).expand(-1, rel_w.shape[1], -1).reshape(-1, 4)
-    rel_b = quat_rotate_inverse(q, rel_w.reshape(-1, 3)).reshape(rel_w.shape)
+    rel_b = quat_apply_inverse(q, rel_w.reshape(-1, 3)).reshape(rel_w.shape)
     return rel_b.reshape(rel_b.shape[0], -1)
 
 
@@ -90,3 +90,4 @@ def hand_contact_flags(
     cs: ContactSensor = env.scene.sensors[sensor_cfg.name]
     f = torch.linalg.norm(cs.data.net_forces_w[:, sensor_cfg.body_ids, :], dim=-1)
     return (f > force_threshold).float()
+

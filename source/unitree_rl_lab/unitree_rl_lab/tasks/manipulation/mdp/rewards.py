@@ -18,7 +18,7 @@ import torch
 
 from isaaclab.assets import Articulation, RigidObject
 from isaaclab.managers import SceneEntityCfg
-from isaaclab.utils.math import quat_rotate_inverse, yaw_quat
+from isaaclab.utils.math import quat_apply_inverse, yaw_quat
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
@@ -33,7 +33,7 @@ def _box_relative_xy(env: "ManagerBasedRLEnv", object_cfg: SceneEntityCfg, robot
     box: RigidObject = env.scene[object_cfg.name]
     robot: Articulation = env.scene[robot_cfg.name]
     rel_w = box.data.root_pos_w - robot.data.root_pos_w
-    rel_b = quat_rotate_inverse(yaw_quat(robot.data.root_quat_w), rel_w)
+    rel_b = quat_apply_inverse(yaw_quat(robot.data.root_quat_w), rel_w)
     return rel_b[:, 0], rel_b[:, 1]
 
 

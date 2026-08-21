@@ -277,6 +277,17 @@ class RewardsCfg:
             )
         ),
     )
+     # Posture shaping
+    feet_width = RewTerm(
+        func=mdp.feet_lateral_distance_penalty, weight=2.0,
+        params=dict(max_stance_width=0.30, foot_body_names=[FOOT_BODY_REGEX]),
+    )
+    hip_abduct = RewTerm(func=mdp.hip_abduction_penalty, weight=0.5)
+    knee_flex = RewTerm(
+        func=mdp.knee_flexion_when_squatting, weight=1.5,
+        params=dict(target_knee_angle=1.2, std=0.3, near_threshold=0.75),
+    )
+    leg_sym = RewTerm(func=mdp.leg_symmetry_penalty, weight=0.2)
 
 
 # ---------------------------------------------------------------------------
