@@ -16,10 +16,10 @@ Phases:
 
 from __future__ import annotations
 
+import math
 from typing import TYPE_CHECKING
 
 import torch
-import math
 
 from isaaclab.assets import Articulation, RigidObject
 from isaaclab.managers import SceneEntityCfg
@@ -30,9 +30,9 @@ if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
 
 
-# ---------------------------------------------------------------------------
+# ===========================================================================
 # Helpers
-# ---------------------------------------------------------------------------
+# ===========================================================================
 
 
 def _box_relative_xy(
@@ -54,7 +54,18 @@ def _hand_positions_w(
 ) -> torch.Tensor:
     robot: Articulation = env.scene[robot_cfg.name]
     body_ids, _ = robot.find_bodies(list(hand_body_names))
-    return robot.data.body_pos_w[:, body_ids, :]  # (N, K, 3)
+    return robot.data.body_pos_w[:, body_ids, :]
+
+
+def _squat_phase(env: "ManagerBasedRLEnv", period: float) -> torch.Tensor:
+    """[0, 1) の周期位相。0=立ち、0.5=しゃがみ、1=立ち。"""
+    return ((env.episode_length_buf * env.step_dt) % period) / period
+
+
+def _squat_depth(env: "ManagerBasedRLEnv", period: float) -> torch.Tensor:
+    """[0, 1] のしゃがみ深さ。0=立ち期、1=しゃがみピーク。"""
+    phi = _squat_phase(env, period)
+    return 0.5 - 0.5 * torch.cos(2 * math.pi * phi)
 
 
 def is_grasped(
@@ -66,7 +77,6 @@ def is_grasped(
     grasp_dist: float = 0.18,
     force_threshold: float = 1.0,
 ) -> torch.Tensor:
-    """0/1 tensor: both hands close to box AND both hands in contact."""
     box: RigidObject = env.scene[object_cfg.name]
     hands_w = _hand_positions_w(env, robot_cfg, list(hand_body_names))
     d = torch.linalg.norm(hands_w - box.data.root_pos_w.unsqueeze(1), dim=-1)
@@ -78,109 +88,69 @@ def is_grasped(
     return (both_near & both_touch).float()
 
 
-# ---------------------------------------------------------------------------
-# Phase 1: approach
-# ---------------------------------------------------------------------------
+# ===========================================================================
+# Phases 1-7 (pickup & carry) — 変更なし
+# ===========================================================================
 
 
-def approach_box(
-    env: "ManagerBasedRLEnv",
-    target_distance: float = 0.55,
-    std: float = 0.35,
-    object_cfg: SceneEntityCfg = SceneEntityCfg("box"),
-    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
-) -> torch.Tensor:
+def approach_box(env, target_distance=0.55, std=0.35,
+                 object_cfg=SceneEntityCfg("box"),
+                 robot_cfg=SceneEntityCfg("robot")):
     dx, dy = _box_relative_xy(env, object_cfg, robot_cfg)
     dist = torch.sqrt(dx * dx + dy * dy + 1e-8)
     err = dist - target_distance
     return torch.exp(-(err * err) / (std * std))
 
 
-# ---------------------------------------------------------------------------
-# Phase 2: face
-# ---------------------------------------------------------------------------
-
-
-def face_box(
-    env: "ManagerBasedRLEnv",
-    object_cfg: SceneEntityCfg = SceneEntityCfg("box"),
-    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
-) -> torch.Tensor:
+def face_box(env, object_cfg=SceneEntityCfg("box"),
+             robot_cfg=SceneEntityCfg("robot")):
     dx, dy = _box_relative_xy(env, object_cfg, robot_cfg)
     dist = torch.sqrt(dx * dx + dy * dy + 1e-8)
-    return dx / dist  # cos(theta) — 1 when facing the box
+    return dx / dist
 
 
-# ---------------------------------------------------------------------------
-# Phase 3: squat
-# ---------------------------------------------------------------------------
-
-
-def squat_when_near_box(
-    env: "ManagerBasedRLEnv",
-    target_height: float = 0.50,
-    near_threshold: float = 0.75,
-    std: float = 0.10,
-    object_cfg: SceneEntityCfg = SceneEntityCfg("box"),
-    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
-) -> torch.Tensor:
+def squat_when_near_box(env, target_height=0.50, near_threshold=0.75, std=0.10,
+                        object_cfg=SceneEntityCfg("box"),
+                        robot_cfg=SceneEntityCfg("robot")):
     robot: Articulation = env.scene[robot_cfg.name]
     dx, dy = _box_relative_xy(env, object_cfg, robot_cfg)
     dist = torch.sqrt(dx * dx + dy * dy + 1e-8)
     near = (dist < near_threshold).float()
-
     h = robot.data.root_pos_w[:, 2]
     err = h - target_height
     return near * torch.exp(-(err * err) / (std * std))
 
 
-def hold_still_when_squatting(
-    env: "ManagerBasedRLEnv",
-    near_threshold: float = 0.75,
-    object_cfg: SceneEntityCfg = SceneEntityCfg("box"),
-    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
-) -> torch.Tensor:
+def hold_still_when_squatting(env, near_threshold=0.75,
+                              object_cfg=SceneEntityCfg("box"),
+                              robot_cfg=SceneEntityCfg("robot")):
     robot: Articulation = env.scene[robot_cfg.name]
     dx, dy = _box_relative_xy(env, object_cfg, robot_cfg)
     dist = torch.sqrt(dx * dx + dy * dy + 1e-8)
     near = (dist < near_threshold).float()
-
     lin_speed = torch.linalg.norm(robot.data.root_lin_vel_b[:, :2], dim=-1)
     ang_speed = torch.abs(robot.data.root_ang_vel_b[:, 2])
     return -near * (lin_speed + 0.5 * ang_speed)
 
 
-# ---------------------------------------------------------------------------
-# Phase 4: hands to box
-# ---------------------------------------------------------------------------
-
-
-def hands_near_box(
-    env: "ManagerBasedRLEnv",
-    std: float = 0.15,
-    hand_body_names: list[str] = ("left_wrist_yaw_link", "right_wrist_yaw_link"),
-    near_threshold: float = 0.75,
-    object_cfg: SceneEntityCfg = SceneEntityCfg("box"),
-    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
-) -> torch.Tensor:
-    """Gaussian on mean(hand→box distance), gated by base-to-box proximity."""
+def hands_near_box(env, std=0.15,
+                   hand_body_names=("left_wrist_yaw_link", "right_wrist_yaw_link"),
+                   near_threshold=0.75,
+                   object_cfg=SceneEntityCfg("box"),
+                   robot_cfg=SceneEntityCfg("robot")):
     box: RigidObject = env.scene[object_cfg.name]
     dx, dy = _box_relative_xy(env, object_cfg, robot_cfg)
     dist_base = torch.sqrt(dx * dx + dy * dy + 1e-8)
     near = (dist_base < near_threshold).float()
-
     hands_w = _hand_positions_w(env, robot_cfg, list(hand_body_names))
     d = torch.linalg.norm(hands_w - box.data.root_pos_w.unsqueeze(1), dim=-1)
     score = torch.exp(-(d * d) / (std * std)).mean(dim=-1)
     return near * score
 
 
-def hands_contact_box(
-    env: "ManagerBasedRLEnv",
-    sensor_cfg: SceneEntityCfg = SceneEntityCfg("hand_contact", body_names=[".*_wrist_yaw_link"]),
-    force_threshold: float = 1.0,
-) -> torch.Tensor:
-    """0 / 0.3 / 1.0 depending on how many hands are in contact."""
+def hands_contact_box(env,
+                      sensor_cfg=SceneEntityCfg("hand_contact", body_names=[".*_wrist_yaw_link"]),
+                      force_threshold=1.0):
     cs: ContactSensor = env.scene.sensors[sensor_cfg.name]
     forces = torch.linalg.norm(cs.data.net_forces_w[:, sensor_cfg.body_ids, :], dim=-1)
     hit = (forces > force_threshold).float()
@@ -189,37 +159,20 @@ def hands_contact_box(
     return 0.3 * (any_ - both) + 1.0 * both
 
 
-# ---------------------------------------------------------------------------
-# Phase 5: grasp
-# ---------------------------------------------------------------------------
+def grasp_bonus(env,
+                hand_body_names=("left_wrist_yaw_link", "right_wrist_yaw_link"),
+                contact_sensor_name="hand_contact", grasp_dist=0.18,
+                object_cfg=SceneEntityCfg("box"),
+                robot_cfg=SceneEntityCfg("robot")):
+    return is_grasped(env, object_cfg, robot_cfg, list(hand_body_names),
+                      contact_sensor_name, grasp_dist)
 
 
-def grasp_bonus(
-    env: "ManagerBasedRLEnv",
-    hand_body_names: list[str] = ("left_wrist_yaw_link", "right_wrist_yaw_link"),
-    contact_sensor_name: str = "hand_contact",
-    grasp_dist: float = 0.18,
-    object_cfg: SceneEntityCfg = SceneEntityCfg("box"),
-    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
-) -> torch.Tensor:
-    return is_grasped(env, object_cfg, robot_cfg, list(hand_body_names), contact_sensor_name, grasp_dist)
-
-
-# ---------------------------------------------------------------------------
-# Phase 6: lift / stand up while grasped
-# ---------------------------------------------------------------------------
-
-
-def lift_box(
-    env: "ManagerBasedRLEnv",
-    initial_z: float = 0.1,
-    target_lift: float = 0.4,
-    std: float = 0.12,
-    hand_body_names: list[str] = ("left_wrist_yaw_link", "right_wrist_yaw_link"),
-    contact_sensor_name: str = "hand_contact",
-    object_cfg: SceneEntityCfg = SceneEntityCfg("box"),
-    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
-) -> torch.Tensor:
+def lift_box(env, initial_z=0.1, target_lift=0.4, std=0.12,
+             hand_body_names=("left_wrist_yaw_link", "right_wrist_yaw_link"),
+             contact_sensor_name="hand_contact",
+             object_cfg=SceneEntityCfg("box"),
+             robot_cfg=SceneEntityCfg("robot")):
     box: RigidObject = env.scene[object_cfg.name]
     lifted = box.data.root_pos_w[:, 2] - initial_z
     err = lifted - target_lift
@@ -228,15 +181,11 @@ def lift_box(
     return gated * gauss
 
 
-def stand_up_when_lifting(
-    env: "ManagerBasedRLEnv",
-    stand_height: float = 0.75,
-    std: float = 0.10,
-    hand_body_names: list[str] = ("left_wrist_yaw_link", "right_wrist_yaw_link"),
-    contact_sensor_name: str = "hand_contact",
-    object_cfg: SceneEntityCfg = SceneEntityCfg("box"),
-    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
-) -> torch.Tensor:
+def stand_up_when_lifting(env, stand_height=0.75, std=0.10,
+                          hand_body_names=("left_wrist_yaw_link", "right_wrist_yaw_link"),
+                          contact_sensor_name="hand_contact",
+                          object_cfg=SceneEntityCfg("box"),
+                          robot_cfg=SceneEntityCfg("robot")):
     robot: Articulation = env.scene[robot_cfg.name]
     err = robot.data.root_pos_w[:, 2] - stand_height
     gauss = torch.exp(-(err * err) / (std * std))
@@ -244,20 +193,11 @@ def stand_up_when_lifting(
     return gated * gauss
 
 
-# ---------------------------------------------------------------------------
-# Phase 7: carry
-# ---------------------------------------------------------------------------
-
-
-def carry_box_velocity(
-    env: "ManagerBasedRLEnv",
-    command_name: str = "base_velocity",
-    std: float = 0.4,
-    hand_body_names: list[str] = ("left_wrist_yaw_link", "right_wrist_yaw_link"),
-    contact_sensor_name: str = "hand_contact",
-    object_cfg: SceneEntityCfg = SceneEntityCfg("box"),
-    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
-) -> torch.Tensor:
+def carry_box_velocity(env, command_name="base_velocity", std=0.4,
+                       hand_body_names=("left_wrist_yaw_link", "right_wrist_yaw_link"),
+                       contact_sensor_name="hand_contact",
+                       object_cfg=SceneEntityCfg("box"),
+                       robot_cfg=SceneEntityCfg("robot")):
     robot: Articulation = env.scene[robot_cfg.name]
     cmd = env.command_manager.get_command(command_name)[:, :2]
     err = torch.linalg.norm(robot.data.root_lin_vel_b[:, :2] - cmd, dim=-1)
@@ -266,86 +206,185 @@ def carry_box_velocity(
     return gated * gauss
 
 
-# ---------------------------------------------------------------------------
-# Safety
-# ---------------------------------------------------------------------------
-
-
-def drop_box_penalty(
-    env: "ManagerBasedRLEnv",
-    min_z: float = 0.05,
-    object_cfg: SceneEntityCfg = SceneEntityCfg("box"),
-) -> torch.Tensor:
+def drop_box_penalty(env, min_z=0.05, object_cfg=SceneEntityCfg("box")):
     box: RigidObject = env.scene[object_cfg.name]
     return (box.data.root_pos_w[:, 2] < min_z).float() * -1.0
 
 
-def box_collision_penalty(
-    env: "ManagerBasedRLEnv",
-    min_distance: float = 0.30,
-    object_cfg: SceneEntityCfg = SceneEntityCfg("box"),
-    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
-) -> torch.Tensor:
+def box_collision_penalty(env, min_distance=0.30,
+                          object_cfg=SceneEntityCfg("box"),
+                          robot_cfg=SceneEntityCfg("robot")):
     dx, dy = _box_relative_xy(env, object_cfg, robot_cfg)
     dist = torch.sqrt(dx * dx + dy * dy + 1e-8)
     intrusion = (min_distance - dist).clamp(min=0.0)
     return -intrusion
 
+
+# ===========================================================================
+# Knee-primary squat rewards (これが今回のメイン)
 # ---------------------------------------------------------------------------
-# Posture shaping: 
-# ---------------------------------------------------------------------------
+# 設計方針:
+#   - 「膝が曲がること」を最優先の主報酬にする
+#   - 「胴体が低いこと」の報酬は膝が曲がっている時だけ与える
+#     → 開脚で下げても報酬ゼロ、膝で下げると報酬2倍(高さ×膝)
+#   - 開脚は 3 種類のペナルティで多角的に叩く(hip_roll角、絶対値、足間距離)
+#   - 立ち止まりは周期目標で強制的に損させる
+# ===========================================================================
+
+
+def knee_bent_reward(
+    env: "ManagerBasedRLEnv",
+    robot_cfg: SceneEntityCfg = SceneEntityCfg(
+        "robot", joint_names=["left_knee_joint", "right_knee_joint"]
+    ),
+    max_angle: float = 1.5,
+) -> torch.Tensor:
+    """膝が曲がっているほど良い(常時ON、リニア、target無し)。
+
+    しゃがみ学習の最主要報酬。target がないので勾配が消えず、初期方策から
+    徐々に膝屈曲を発見させられる。
+    """
+    robot: Articulation = env.scene[robot_cfg.name]
+    q = robot.data.joint_pos[:, robot_cfg.joint_ids]
+    return q.clamp(0.0, max_angle).mean(dim=-1)
+
+
+def hip_pitch_bent_reward(
+    env: "ManagerBasedRLEnv",
+    robot_cfg: SceneEntityCfg = SceneEntityCfg(
+        "robot", joint_names=["left_hip_pitch_joint", "right_hip_pitch_joint"]
+    ),
+    max_abs_angle: float = 1.2,
+) -> torch.Tensor:
+    """股関節pitchが曲がっているほど良い。膝と協調して初めて胴体が下がる。"""
+    robot: Articulation = env.scene[robot_cfg.name]
+    q = robot.data.joint_pos[:, robot_cfg.joint_ids]
+    return q.abs().clamp(0.0, max_abs_angle).mean(dim=-1)
+
+
+def height_low_gated_by_knee(
+    env: "ManagerBasedRLEnv",
+    max_height: float = 0.78,
+    min_height: float = 0.40,
+    knee_gate_min: float = 0.5,
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    knee_cfg: SceneEntityCfg = SceneEntityCfg(
+        "robot", joint_names=["left_knee_joint", "right_knee_joint"]
+    ),
+) -> torch.Tensor:
+    """胴体が低いほど良い。ただし膝が曲がっていない場合は報酬ゼロ。
+
+    開脚で下げても膝が伸びたままなら knee_ok≈0 で報酬が消えるので、
+    「胴体を下げる = 膝を曲げる」以外の解が事実上塞がれる。
+    """
+    robot: Articulation = env.scene[robot_cfg.name]
+    h = robot.data.root_pos_w[:, 2]
+    height_score = ((max_height - h) / (max_height - min_height)).clamp(0.0, 1.0)
+
+    knee = robot.data.joint_pos[:, knee_cfg.joint_ids].mean(dim=-1)
+    knee_ok = torch.sigmoid(10.0 * (knee - knee_gate_min))  # 0.5rad未満で0、以上で1
+
+    return height_score * knee_ok
+
+
+# ---------- 周期スクワット目標 ----------
+
+
+def periodic_height_target(
+    env: "ManagerBasedRLEnv",
+    period: float = 3.0,
+    stand_height: float = 0.75,
+    squat_height: float = 0.50,
+    std: float = 0.08,
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """胴体高さが sin 波の目標に追従するほど高報酬(ガウシアン)。"""
+    robot: Articulation = env.scene[robot_cfg.name]
+    phi = _squat_phase(env, period)
+    mid = 0.5 * (stand_height + squat_height)
+    amp = 0.5 * (stand_height - squat_height)
+    target = mid + amp * torch.cos(2 * math.pi * phi)
+    h = robot.data.root_pos_w[:, 2]
+    err = h - target
+    return torch.exp(-(err * err) / (std * std))
+
+
+def periodic_knee_target(
+    env: "ManagerBasedRLEnv",
+    period: float = 3.0,
+    stand_knee: float = 0.1,
+    squat_knee: float = 1.3,
+    robot_cfg: SceneEntityCfg = SceneEntityCfg(
+        "robot", joint_names=["left_knee_joint", "right_knee_joint"]
+    ),
+) -> torch.Tensor:
+    """膝角度が周期目標に近いほど良い(リニア、常時ON)。"""
+    robot: Articulation = env.scene[robot_cfg.name]
+    depth = _squat_depth(env, period)  # 0..1
+    target = stand_knee + (squat_knee - stand_knee) * depth
+    q = robot.data.joint_pos[:, robot_cfg.joint_ids].mean(dim=-1)
+    return -torch.abs(q - target)
+
+
+def periodic_hip_pitch_target(
+    env: "ManagerBasedRLEnv",
+    period: float = 3.0,
+    stand_hip: float = 0.0,
+    squat_hip: float = -0.7,
+    robot_cfg: SceneEntityCfg = SceneEntityCfg(
+        "robot", joint_names=["left_hip_pitch_joint", "right_hip_pitch_joint"]
+    ),
+) -> torch.Tensor:
+    """股関節pitchが周期目標に近いほど良い(膝と協調して胴体を下げる)。"""
+    robot: Articulation = env.scene[robot_cfg.name]
+    depth = _squat_depth(env, period)
+    target = stand_hip + (squat_hip - stand_hip) * depth
+    q = robot.data.joint_pos[:, robot_cfg.joint_ids].mean(dim=-1)
+    return -torch.abs(q - target)
+
+
+# ---------- 開脚抑制(多角的に叩く) ----------
 
 
 def hip_abduction_penalty(
     env: "ManagerBasedRLEnv",
     robot_cfg: SceneEntityCfg = SceneEntityCfg(
-        "robot",
-        joint_names=["left_hip_roll_joint", "right_hip_roll_joint"],
+        "robot", joint_names=["left_hip_roll_joint", "right_hip_roll_joint"]
     ),
 ) -> torch.Tensor:
-    """hip_roll The further the hip abduction deviates from the neutral position (0), the greater the penalty."""
+    """hip_roll の二乗和ペナルティ。大きく開くほど急激に痛い。"""
     robot: Articulation = env.scene[robot_cfg.name]
     q = robot.data.joint_pos[:, robot_cfg.joint_ids]
     return -(q ** 2).sum(dim=-1)
 
 
+def hip_roll_magnitude_penalty(
+    env: "ManagerBasedRLEnv",
+    robot_cfg: SceneEntityCfg = SceneEntityCfg(
+        "robot", joint_names=["left_hip_roll_joint", "right_hip_roll_joint"]
+    ),
+) -> torch.Tensor:
+    """hip_roll の絶対値和ペナルティ。小さな外転も見逃さない。"""
+    robot: Articulation = env.scene[robot_cfg.name]
+    q = robot.data.joint_pos[:, robot_cfg.joint_ids]
+    return -q.abs().sum(dim=-1)
+
+
 def feet_lateral_distance_penalty(
     env: "ManagerBasedRLEnv",
-    max_stance_width: float = 0.30,
+    max_stance_width: float = 0.25,
     foot_body_names: list[str] = (".*_ankle_roll_link",),
     robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
 ) -> torch.Tensor:
-    """A linear penalty is applied for the amount by which the distance between the left and right feet exceeds `max_stance_width`."""
+    """足の左右間隔が max_stance_width を超えた分だけリニアにペナルティ。"""
     robot: Articulation = env.scene[robot_cfg.name]
     body_ids, _ = robot.find_bodies(list(foot_body_names))
-    feet_w = robot.data.body_pos_w[:, body_ids, :]  # (N, 2, 3)
+    feet_w = robot.data.body_pos_w[:, body_ids, :]
     rel = feet_w[:, 0, :] - feet_w[:, 1, :]
     rel_b = quat_apply_inverse(yaw_quat(robot.data.root_quat_w), rel)
     lateral = torch.abs(rel_b[:, 1])
     excess = (lateral - max_stance_width).clamp(min=0.0)
     return -excess
-
-
-def knee_flexion_when_squatting(
-    env: "ManagerBasedRLEnv",
-    target_knee_angle: float = 1.2,
-    std: float = 0.3,
-    near_threshold: float = 0.75,
-    robot_cfg: SceneEntityCfg = SceneEntityCfg(
-        "robot",
-        joint_names=["left_knee_joint", "right_knee_joint"],
-    ),
-    object_cfg: SceneEntityCfg = SceneEntityCfg("box"),
-) -> torch.Tensor:
-    """The higher the reward, the more your knee is bent toward the target_knee_angle when you're near the box."""
-    robot: Articulation = env.scene[robot_cfg.name]
-    dx, dy = _box_relative_xy(env, object_cfg, robot_cfg)
-    dist = torch.sqrt(dx * dx + dy * dy + 1e-8)
-    near = (dist < near_threshold).float()
-
-    q = robot.data.joint_pos[:, robot_cfg.joint_ids]
-    err = q.mean(dim=-1) - target_knee_angle
-    return near * torch.exp(-(err * err) / (std * std))
 
 
 def leg_symmetry_penalty(
@@ -360,155 +399,67 @@ def leg_symmetry_penalty(
         "robot", joint_names=["left_knee_joint", "right_knee_joint"]
     ),
 ) -> torch.Tensor:
-    """The more symmetrical the left and right ankle joints are, the better (= the square of the difference)"""
+    """左右対称なほど良い。hip_roll は符号反転で対称になる点に注意。"""
     robot: Articulation = env.scene[robot_cfg_roll.name]
     q_roll = robot.data.joint_pos[:, robot_cfg_roll.joint_ids]
     q_pitch = robot.data.joint_pos[:, robot_cfg_pitch.joint_ids]
     q_knee = robot.data.joint_pos[:, robot_cfg_knee.joint_ids]
-    d_roll = q_roll[:, 0] + q_roll[:, 1]         
-    d_pitch = q_pitch[:, 0] - q_pitch[:, 1]     
+    d_roll = q_roll[:, 0] + q_roll[:, 1]
+    d_pitch = q_pitch[:, 0] - q_pitch[:, 1]
     d_knee = q_knee[:, 0] - q_knee[:, 1]
     return -(d_roll ** 2 + d_pitch ** 2 + d_knee ** 2)
 
 
-# ---------------------------------------------------------------------------
-# Unconditional posture rewards (linear, always-on gradient)
-# ---------------------------------------------------------------------------
+# ---------- 足浮き抑制(緩め) ----------
 
-def base_height_low(
-    env: "ManagerBasedRLEnv",
-    max_height: float = 0.78,
-    min_height: float = 0.40,
-    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
-) -> torch.Tensor:
-    robot: Articulation = env.scene[robot_cfg.name]
-    h = robot.data.root_pos_w[:, 2]
-    return ((max_height - h) / (max_height - min_height)).clamp(0.0, 1.0)
-
-
-def knee_bent(
-    env: "ManagerBasedRLEnv",
-    robot_cfg: SceneEntityCfg = SceneEntityCfg(
-        "robot",
-        joint_names=["left_knee_joint", "right_knee_joint"],
-    ),
-    max_angle: float = 1.6,
-) -> torch.Tensor:
-    robot: Articulation = env.scene[robot_cfg.name]
-    q = robot.data.joint_pos[:, robot_cfg.joint_ids]
-    return q.clamp(0.0, max_angle).mean(dim=-1)
-
-# ---------------------------------------------------------------------------
-# Periodic squat-stand cycle 
-# ---------------------------------------------------------------------------
-def _squat_phase(env: "ManagerBasedRLEnv", period: float) -> torch.Tensor:
-    return ((env.episode_length_buf * env.step_dt) % period) / period
-
-
-def periodic_squat_height(
-    env: "ManagerBasedRLEnv",
-    period: float = 3.0,
-    stand_height: float = 0.75,
-    squat_height: float = 0.50,
-    std: float = 0.06,
-    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
-) -> torch.Tensor:
-    robot: Articulation = env.scene[robot_cfg.name]
-    phi = _squat_phase(env, period)                              
-    mid = 0.5 * (stand_height + squat_height)
-    amp = 0.5 * (stand_height - squat_height)
-    target = mid + amp * torch.cos(2 * math.pi * phi)              
-
-    h = robot.data.root_pos_w[:, 2]
-    err = h - target
-    return torch.exp(-(err * err) / (std * std))
-
-
-def periodic_knee_bend(
-    env: "ManagerBasedRLEnv",
-    period: float = 3.0,
-    stand_knee: float = 0.1,
-    squat_knee: float = 1.3,
-    std: float = 0.25,
-    robot_cfg: SceneEntityCfg = SceneEntityCfg(
-        "robot", joint_names=["left_knee_joint", "right_knee_joint"]
-    ),
-) -> torch.Tensor:
-    robot: Articulation = env.scene[robot_cfg.name]
-    phi = _squat_phase(env, period)
-    mid = 0.5 * (stand_knee + squat_knee)
-    amp = 0.5 * (squat_knee - stand_knee)
-    target = mid - amp * torch.cos(2 * math.pi * phi)   
-
-    q = robot.data.joint_pos[:, robot_cfg.joint_ids].mean(dim=-1)
-    err = q - target
-    return torch.exp(-(err * err) / (std * std))
-
-
-def squat_motion_penalty(
-    env: "ManagerBasedRLEnv",
-    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
-    freeze_penalty: float = 0.5,
-) -> torch.Tensor:
-    
-    robot: Articulation = env.scene[robot_cfg.name]
-    vz = torch.abs(robot.data.root_lin_vel_w[:, 2])
-    # vz < 0.05 m/s 
-    is_frozen = (vz < 0.05).float()
-    return -freeze_penalty * is_frozen
-
-def periodic_squat_height(
-    env: "ManagerBasedRLEnv",
-    period: float = 3.0,
-    stand_height: float = 0.75,
-    squat_height: float = 0.50,
-    std: float = 0.06,
-    # --- 膝ゲート ---
-    knee_gate_min: float = 0.4,          # squat期でこの角度以上曲がってないと報酬ゼロ
-    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
-    knee_cfg: SceneEntityCfg = SceneEntityCfg(
-        "robot", joint_names=["left_knee_joint", "right_knee_joint"]
-    ),
-) -> torch.Tensor:
-    """胴体高さが目標に追従＋膝が十分曲がっているときのみ報酬。"""
-    robot: Articulation = env.scene[robot_cfg.name]
-    phi = _squat_phase(env, period)
-    mid = 0.5 * (stand_height + squat_height)
-    amp = 0.5 * (stand_height - squat_height)
-    target = mid + amp * torch.cos(2 * math.pi * phi)
-
-    h = robot.data.root_pos_w[:, 2]
-    err = h - target
-    height_score = torch.exp(-(err * err) / (std * std))
-
-    # squat期の深さ(0=立ち, 1=しゃがみ)
-    squat_depth = 0.5 - 0.5 * torch.cos(2 * math.pi * phi)  # 0..1
-
-    # 膝が要求角度以上曲がっているか(squat期のみ厳しく)
-    knee = robot.data.joint_pos[:, knee_cfg.joint_ids].mean(dim=-1)
-    required_knee = squat_depth * knee_gate_min  # 立ち期は0でOK、しゃがみ期は0.4以上要求
-    knee_ok = torch.sigmoid(10.0 * (knee - required_knee))  # 満たすほど1、そうでないと0
-
-    return height_score * knee_ok
-
-def hip_roll_magnitude_penalty(
-    env: "ManagerBasedRLEnv",
-    robot_cfg: SceneEntityCfg = SceneEntityCfg(
-        "robot", joint_names=["left_hip_roll_joint", "right_hip_roll_joint"],
-    ),
-) -> torch.Tensor:
-    """hip_roll の絶対値の和(=どちらか一方でも外転していたらペナルティ)。"""
-    robot: Articulation = env.scene[robot_cfg.name]
-    q = robot.data.joint_pos[:, robot_cfg.joint_ids]
-    return -q.abs().sum(dim=-1)
 
 def feet_air_time_penalty(
     env: "ManagerBasedRLEnv",
-    sensor_cfg: SceneEntityCfg = SceneEntityCfg("foot_contact", body_names=[".*_ankle_roll_link"]),
-    grace_period: float = 0.2,   # 0.2秒までの浮きは無罰(自然な歩行余裕)
+    sensor_cfg: SceneEntityCfg = SceneEntityCfg(
+        "foot_contact", body_names=[".*_ankle_roll_link"]
+    ),
+    grace_period: float = 0.2,
 ) -> torch.Tensor:
     """空中滞在時間が grace_period を超えた分だけリニアにペナルティ。"""
     cs: ContactSensor = env.scene.sensors[sensor_cfg.name]
-    air = cs.data.current_air_time[:, sensor_cfg.body_ids]   # (N, 2)
+    air = cs.data.current_air_time[:, sensor_cfg.body_ids]
     excess = (air - grace_period).clamp(min=0.0).sum(dim=-1)
     return -excess
+
+
+# ---------- 立ち止まり抑制 ----------
+
+
+def freeze_penalty(
+    env: "ManagerBasedRLEnv",
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    vz_threshold: float = 0.05,
+) -> torch.Tensor:
+    """胴体の上下速度がほぼゼロの間ペナルティ(周期スクワット中の停止を防ぐ)。"""
+    robot: Articulation = env.scene[robot_cfg.name]
+    vz = torch.abs(robot.data.root_lin_vel_w[:, 2])
+    return -(vz < vz_threshold).float()
+
+def knee_flexion_when_squatting(
+    env: "ManagerBasedRLEnv",
+    target_knee_angle: float = 1.2,
+    std: float = 0.3,
+    near_threshold: float = 0.75,
+    robot_cfg: SceneEntityCfg = SceneEntityCfg(
+        "robot", joint_names=["left_knee_joint", "right_knee_joint"]
+    ),
+    object_cfg: SceneEntityCfg = SceneEntityCfg("box"),
+) -> torch.Tensor:
+    """箱の近くにいるとき膝が target_knee_angle 付近に曲がっているほど高報酬。
+
+    本タスク(pickup_carry_env_cfg)から参照されているので保持。
+    squat-only では periodic_knee_target を使うためこの関数は使わない。
+    """
+    robot: Articulation = env.scene[robot_cfg.name]
+    dx, dy = _box_relative_xy(env, object_cfg, robot_cfg)
+    dist = torch.sqrt(dx * dx + dy * dy + 1e-8)
+    near = (dist < near_threshold).float()
+
+    q = robot.data.joint_pos[:, robot_cfg.joint_ids]
+    err = q.mean(dim=-1) - target_knee_angle
+    return near * torch.exp(-(err * err) / (std * std))
