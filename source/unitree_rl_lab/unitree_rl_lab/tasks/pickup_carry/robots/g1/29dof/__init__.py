@@ -26,3 +26,24 @@ gym.register(
         "rsl_rl_cfg_entry_point": "unitree_rl_lab.tasks.pickup_carry.agents.rsl_rl_ppo_cfg:G1PickupCarryPPORunnerCfg",
     },
 )
+
+# ----- SquatOnly ------------------------------------------------
+gym.register(
+    id="Unitree-G1-29dof-SquatOnly",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": "unitree_rl_lab.tasks.pickup_carry.robots.g1.29dof.squat_only_env_cfg:G1SquatOnlyEnvCfg",
+        "rsl_rl_cfg_entry_point": "unitree_rl_lab.tasks.pickup_carry.agents.rsl_rl_ppo_cfg:G1PickupCarryPPORunnerCfg",
+    },
+)
+
+gym.register(
+    id="Unitree-G1-29dof-SquatOnly-Play",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": "unitree_rl_lab.tasks.pickup_carry.robots.g1.29dof.squat_only_env_cfg:G1SquatOnlyEnvCfg_PLAY",
+        "rsl_rl_cfg_entry_point": "unitree_rl_lab.tasks.pickup_carry.agents.rsl_rl_ppo_cfg:G1PickupCarryPPORunnerCfg",
+    },
+)
