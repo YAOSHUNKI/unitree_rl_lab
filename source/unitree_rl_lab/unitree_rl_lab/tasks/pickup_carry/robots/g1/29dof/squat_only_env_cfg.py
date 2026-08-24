@@ -37,8 +37,10 @@ class PeriodicSquatRewardsCfg:
     )
     leg_sym = RewTerm(func=mdp.leg_symmetry_penalty, weight=0.3)
 
-    # === 転倒防止(緩め) ===
-    flat_orient = RewTerm(func=mdp.flat_orientation_l2, weight=-0.5)
+    # === 転倒防止(寝転がり厳罰) ===
+    upright   = RewTerm(func=mdp.upright_bonus, weight=8.0)     # 立ってれば +1、寝てれば 0
+    fallen    = RewTerm(func=mdp.fallen_penalty, weight=20.0,   # 寝転がると -20 〜 -40
+                        params=dict(tilt_threshold=-0.3, height_threshold=0.30))
 
     # === 正則化(最小限) ===
     ang_vel_xy   = RewTerm(func=mdp.ang_vel_xy_l2, weight=-0.01)
@@ -48,7 +50,7 @@ class PeriodicSquatRewardsCfg:
     dof_pos_lim  = RewTerm(func=mdp.joint_pos_limits, weight=-2.0)
 
     arm_default = RewTerm(
-        func=mdp.joint_deviation_l1, weight=-0.1,
+        func=mdp.joint_deviation_l1, weight=-0.0,
         params=dict(asset_cfg=SceneEntityCfg(
             "robot", joint_names=[".*_shoulder_.*", ".*_elbow_.*", ".*_wrist_.*"]
         )),
@@ -83,13 +85,26 @@ class G1PeriodicSquatEnvCfg(G1PickupCarryEnvCfg):
         default["left_hip_pitch_joint"] = -0.75
         default["right_hip_pitch_joint"] = -0.75
         default[".*_knee_joint"] = 1.5
-        default[".*_ankle_pitch_joint"] = -0.75
+        default[".*_ankle_pitch_joint"] = -0.5
         self.scene.robot.init_state.joint_pos = default
+
+        # base_contact 終了は無効化(pelvisが低い姿勢で偶発接触が起きても終了しない)
+        self.terminations.base_contact = None
+
+        # 代わりに「明らかに転倒した」時だけ終了させる
+        # bad_orientation: 胴体が limit_angle rad より傾いたら終了
+        from isaaclab.managers import TerminationTermCfg as DoneTerm
+        self.terminations.fell_over = DoneTerm(
+            func=mdp.bad_orientation,
+            params=dict(limit_angle=1.2),  # 約 69°より傾いたら終了(寝転がり)
+        )
 
         # デバッグ: 実際に反映されたか確認(初回のみ出力される)
         print(">>> warm start joint_pos:", 
               {k: v for k, v in self.scene.robot.init_state.joint_pos.items()
                if "hip_pitch" in k or "knee" in k or "ankle_pitch" in k})
+        print(">>> terminations.base_contact disabled:",
+              self.terminations.base_contact)
 
 
 @configclass
