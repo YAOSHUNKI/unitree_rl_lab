@@ -502,3 +502,109 @@ def fallen_penalty(
     too_low = (h < height_threshold).float()
     return -(too_tilted + too_low)   # 両方満たせば -2、片方で -1
 
+# ===========================================================================
+# v2: 参照姿勢トラッキング型スクワット報酬
+# ---------------------------------------------------------------------------
+# 設計原則:
+#   1. すべての項を [0, 1] の正値に。→ 生存が常に得 = 自殺(寝転がり)しない
+#   2. 脚の全関節を「一本の参照姿勢」で同時に追従。
+#      → 膝・股・足首・内転が互いに矛盾せず、開脚も自動的に潰れる
+#   3. 転倒は「罰」ではなく「終了条件」で扱う
+#   4. SceneEntityCfg は必ず RewTerm の params で渡すこと!
+#      (デフォルト引数の SceneEntityCfg は resolve されず全関節を指す)
+# ===========================================================================
+
+
+def squat_pose_tracking(
+    env: "ManagerBasedRLEnv",
+    period: float = 6.0,
+    std: float = 0.50,
+    stand_hip_pitch: float = -0.10,
+    squat_hip_pitch: float = -0.95,
+    stand_knee: float = 0.30,
+    squat_knee: float = 1.50,
+    stand_ankle: float = -0.20,
+    squat_ankle: float = -0.55,
+    hip_pitch_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    knee_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    ankle_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    lateral_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """脚の参照姿勢への追従度 [0, 1]。これがスクワット学習の主報酬。
+
+    位相 phi に応じて (hip_pitch, knee, ankle_pitch) の目標が
+    立ち姿勢 <-> しゃがみ姿勢 の間を sin 補間する。
+    lateral (hip_roll / hip_yaw) は常に 0 目標 = 開脚とねじれを禁止。
+
+    立ち姿勢では hip_pitch + knee + ankle_pitch = 0 (胴体が垂直)。
+    しゃがみ姿勢も -0.95 + 1.50 - 0.55 = 0 でほぼ垂直を保つ。
+
+    NOTE: 4つの SceneEntityCfg は必ず RewTerm(params=...) で渡すこと。
+    """
+    robot: Articulation = env.scene[hip_pitch_cfg.name]
+    depth = _squat_depth(env, period).unsqueeze(-1)  # (N, 1)
+
+    err_sq = torch.zeros(env.num_envs, device=robot.data.joint_pos.device)
+
+    for cfg, q_stand, q_squat in (
+        (hip_pitch_cfg, stand_hip_pitch, squat_hip_pitch),
+        (knee_cfg, stand_knee, squat_knee),
+        (ankle_cfg, stand_ankle, squat_ankle),
+    ):
+        target = q_stand + (q_squat - q_stand) * depth      # (N, 1)
+        q = robot.data.joint_pos[:, cfg.joint_ids]          # (N, 2)
+        err_sq = err_sq + ((q - target) ** 2).mean(dim=-1)
+
+    # hip_roll / hip_yaw は常に 0 (開脚・ねじれの禁止)
+    q_lat = robot.data.joint_pos[:, lateral_cfg.joint_ids]
+    err_sq = err_sq + (q_lat ** 2).mean(dim=-1)
+
+    return torch.exp(-err_sq / (std * std))
+
+
+def squat_height_tracking(
+    env: "ManagerBasedRLEnv",
+    period: float = 6.0,
+    stand_height: float = 0.74,
+    squat_height: float = 0.52,
+    std: float = 0.10,
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """胴体高さの参照追従 [0, 1]。関節角だけ合っていて体が浮く/傾く解を潰す。"""
+    robot: Articulation = env.scene[robot_cfg.name]
+    depth = _squat_depth(env, period)
+    target = stand_height + (squat_height - stand_height) * depth
+    err = robot.data.root_pos_w[:, 2] - target
+    return torch.exp(-(err * err) / (std * std))
+
+
+def feet_grounded(
+    env: "ManagerBasedRLEnv",
+    sensor_cfg: SceneEntityCfg = SceneEntityCfg("foot_contact"),
+    force_threshold: float = 1.0,
+) -> torch.Tensor:
+    """接地している足の割合 [0, 0.5, 1.0]。正報酬なので跳ねる解を潰す。"""
+    cs: ContactSensor = env.scene.sensors[sensor_cfg.name]
+    forces = torch.linalg.norm(cs.data.net_forces_w[:, sensor_cfg.body_ids, :], dim=-1)
+    return (forces > force_threshold).float().mean(dim=-1)
+
+
+def feet_stance_width(
+    env: "ManagerBasedRLEnv",
+    target_width: float = 0.20,
+    std: float = 0.12,
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """足の左右間隔が target_width に近いほど良い [0, 1]。
+
+    ペナルティではなく正報酬にすることで、報酬の総和が常に正に保たれる。
+    NOTE: robot_cfg は body_names を指定して params で渡すこと。
+    """
+    robot: Articulation = env.scene[robot_cfg.name]
+    feet_w = robot.data.body_pos_w[:, robot_cfg.body_ids, :]   # (N, 2, 3)
+    rel = feet_w[:, 0, :] - feet_w[:, 1, :]
+    rel_b = quat_apply_inverse(yaw_quat(robot.data.root_quat_w), rel)
+    width = torch.abs(rel_b[:, 1])
+    err = width - target_width
+    return torch.exp(-(err * err) / (std * std))
+

@@ -1,3 +1,22 @@
+"""その場スクワット(立ち <-> しゃがみ)の学習環境。
+
+設計原則 (これまでの失敗から得た教訓):
+
+ 1. 報酬は「すべて正値・有界 [0,1]」にする。
+    合計が負になると、エージェントは早期終了(= 転倒・寝転がり)で
+    return を最大化しようとする。正値だけなら「生き続ける」が常に最適。
+
+ 2. 転倒は「罰」ではなく「終了条件」で扱う。
+
+ 3. 脚の姿勢は個別の関節ごとにバラバラの項で要求せず、
+    「1本の参照姿勢へのトラッキング」1項にまとめる。
+    膝・股・足首・内転が互いに矛盾せず、開脚も自動的に潰れる。
+
+ 4. SceneEntityCfg は必ず RewTerm(params=...) に書く。
+    関数のデフォルト引数に置いた SceneEntityCfg は resolve されず
+    joint_ids が slice(None) のまま = 29関節すべてを指してしまう。
+"""
+
 from __future__ import annotations
 
 from isaaclab.managers import ObservationTermCfg as ObsTerm
@@ -9,52 +28,79 @@ from isaaclab.utils import configclass
 import unitree_rl_lab.tasks.pickup_carry.mdp as mdp
 from .pickup_carry_env_cfg import G1PickupCarryEnvCfg, FOOT_BODY_REGEX
 
-SQUAT_PERIOD = 6.0   # 秒。ゆったり: 3秒下降 + 3秒上昇
+# --- チューニングノブ ------------------------------------------------------
+SQUAT_PERIOD = 6.0        # 秒 / 1周期 (3秒かけて下がり、3秒かけて上がる)
+
+STAND_HIP_PITCH, SQUAT_HIP_PITCH = -0.10, -0.95
+STAND_KNEE,      SQUAT_KNEE      = 0.30, 1.50
+STAND_ANKLE,     SQUAT_ANKLE     = -0.20, -0.55
+# 上記は hip_pitch + knee + ankle_pitch = 0 を満たす -> 胴体が垂直のまま沈む
+
+STAND_HEIGHT, SQUAT_HEIGHT = 0.74, 0.52
+# ---------------------------------------------------------------------------
+
+# SceneEntityCfg は必ず params で渡す (下で使い回す)
+HIP_PITCH_CFG = SceneEntityCfg("robot", joint_names=[".*_hip_pitch_joint"])
+KNEE_CFG      = SceneEntityCfg("robot", joint_names=[".*_knee_joint"])
+ANKLE_CFG     = SceneEntityCfg("robot", joint_names=[".*_ankle_pitch_joint"])
+LATERAL_CFG   = SceneEntityCfg("robot", joint_names=[".*_hip_roll_joint", ".*_hip_yaw_joint"])
+FEET_BODY_CFG = SceneEntityCfg("robot", body_names=[FOOT_BODY_REGEX])
+FOOT_SENSOR_CFG = SceneEntityCfg("foot_contact", body_names=[FOOT_BODY_REGEX])
 
 
 @configclass
 class PeriodicSquatRewardsCfg:
-    """周期スクワット(立ち↔しゃがみ). 立ち姿勢からスタート、周期に必ず追従。
-
-    要点:
-      - 立ちからスタートなので寝転がりへの経路がまず遠い
-      - 周期目標があるので立ちっぱなしは報酬半減
-      - upright 必須で寝転がりは報酬ゼロ + 早期終了
-    """
-    # === 周期主報酬(全部位相ゲート付き = 寝転がりで報酬0) ===
-    period_height = RewTerm(
-        func=mdp.periodic_height_target, weight=15.0,
-        params=dict(period=SQUAT_PERIOD, stand_height=0.75, squat_height=0.50, std=0.10),
+    # ================= 主報酬: 参照姿勢トラッキング (正値・有界) =================
+    pose_track = RewTerm(
+        func=mdp.squat_pose_tracking, weight=6.0,
+        params=dict(
+            period=SQUAT_PERIOD, std=0.50,
+            stand_hip_pitch=STAND_HIP_PITCH, squat_hip_pitch=SQUAT_HIP_PITCH,
+            stand_knee=STAND_KNEE,           squat_knee=SQUAT_KNEE,
+            stand_ankle=STAND_ANKLE,         squat_ankle=SQUAT_ANKLE,
+            hip_pitch_cfg=HIP_PITCH_CFG,
+            knee_cfg=KNEE_CFG,
+            ankle_cfg=ANKLE_CFG,
+            lateral_cfg=LATERAL_CFG,
+        ),
     )
-    period_knee = RewTerm(
-        func=mdp.periodic_knee_target, weight=10.0,
-        params=dict(period=SQUAT_PERIOD, stand_knee=0.15, squat_knee=1.3),
-    )
-    period_hip = RewTerm(
-        func=mdp.periodic_hip_pitch_target, weight=6.0,
-        params=dict(period=SQUAT_PERIOD, stand_hip=-0.1, squat_hip=-0.7),
+    height_track = RewTerm(
+        func=mdp.squat_height_tracking, weight=3.0,
+        params=dict(
+            period=SQUAT_PERIOD, std=0.10,
+            stand_height=STAND_HEIGHT, squat_height=SQUAT_HEIGHT,
+            robot_cfg=SceneEntityCfg("robot"),
+        ),
     )
 
-    # === 立位維持と転倒罰(寝転がり対策) ===
-    upright = RewTerm(func=mdp.upright_bonus, weight=10.0)      # 立ってれば +10/step
-    fallen  = RewTerm(func=mdp.fallen_penalty, weight=25.0,
-                      params=dict(tilt_threshold=-0.3, height_threshold=0.30))
-
-    # === 開脚抑制 ===
-    hip_abduct   = RewTerm(func=mdp.hip_abduction_penalty, weight=2.0)
-    hip_roll_mag = RewTerm(func=mdp.hip_roll_magnitude_penalty, weight=2.0)
-    feet_width = RewTerm(
-        func=mdp.feet_lateral_distance_penalty, weight=5.0,
-        params=dict(max_stance_width=0.30, foot_body_names=[FOOT_BODY_REGEX]),
+    # ================= 補助 (すべて正値) =================
+    upright = RewTerm(
+        func=mdp.upright_bonus, weight=2.0,
+        params=dict(robot_cfg=SceneEntityCfg("robot")),
     )
-    leg_sym = RewTerm(func=mdp.leg_symmetry_penalty, weight=0.3)
+    grounded = RewTerm(
+        func=mdp.feet_grounded, weight=1.0,
+        params=dict(sensor_cfg=FOOT_SENSOR_CFG, force_threshold=1.0),
+    )
+    stance_width = RewTerm(
+        func=mdp.feet_stance_width, weight=1.0,
+        params=dict(target_width=0.20, std=0.12, robot_cfg=FEET_BODY_CFG),
+    )
 
-    # === 正則化(最小限) ===
-    ang_vel_xy   = RewTerm(func=mdp.ang_vel_xy_l2, weight=-0.02)
-    action_rate  = RewTerm(func=mdp.action_rate_l2, weight=-0.001)
-    joint_acc    = RewTerm(func=mdp.joint_acc_l2, weight=-1.0e-7)
-    joint_torque = RewTerm(func=mdp.joint_torques_l2, weight=-1.0e-6)
-    dof_pos_lim  = RewTerm(func=mdp.joint_pos_limits, weight=-2.0)
+    # ================= 正則化 (小さく) =================
+    ang_vel_xy   = RewTerm(func=mdp.ang_vel_xy_l2,     weight=-0.02)
+    action_rate  = RewTerm(func=mdp.action_rate_l2,    weight=-0.005)
+    joint_acc    = RewTerm(func=mdp.joint_acc_l2,      weight=-2.5e-7)
+    joint_torque = RewTerm(func=mdp.joint_torques_l2,  weight=-1.0e-6)
+    dof_pos_lim  = RewTerm(func=mdp.joint_pos_limits,  weight=-1.0)
+    arm_default  = RewTerm(
+        func=mdp.joint_deviation_l1, weight=-0.1,
+        params=dict(asset_cfg=SceneEntityCfg(
+            "robot", joint_names=[".*_shoulder_.*", ".*_elbow_.*", ".*_wrist_.*", "waist_.*"]
+        )),
+    )
+    # 正報酬の最大 = 6 + 3 + 2 + 1 + 1 = 13/step
+    # 正則化は通常 -0.3 程度 -> 合計は常に大きく正 -> 生存が常に最適
 
 
 @configclass
@@ -64,35 +110,43 @@ class G1PeriodicSquatEnvCfg(G1PickupCarryEnvCfg):
     def __post_init__(self):
         super().__post_init__()
 
-        # 速度指令ゼロ固定
+        # --- 移動はさせない ---
         self.commands.base_velocity.ranges.lin_vel_x = (0.0, 0.0)
         self.commands.base_velocity.ranges.lin_vel_y = (0.0, 0.0)
         self.commands.base_velocity.ranges.ang_vel_z = (0.0, 0.0)
         self.commands.base_velocity.rel_standing_envs = 1.0
 
-        # 2周期(12秒)分のエピソード
-        self.episode_length_s = 12.0
+        self.episode_length_s = 12.0   # 2周期
 
-        # 位相観測(policy が今どの位相にいるか知る必要がある)
+        # --- 位相を観測に (これが無いと policy は「今しゃがむ番か」を知れない) ---
         self.observations.policy.squat_phase = ObsTerm(
             func=mdp.squat_phase_obs,
             params=dict(period=SQUAT_PERIOD),
         )
 
-        # ==== warm start は default(立ち姿勢)のまま。深しゃがみから始めない ====
-        # → 寝転がりへの経路が遠くなる
+        # --- 初期姿勢は通常の立ち姿勢 (warm start しない) ---
+        # 参照姿勢の phi=0 と一致させておく
+        default = dict(self.scene.robot.init_state.joint_pos or {})
+        default["left_hip_pitch_joint"]  = STAND_HIP_PITCH
+        default["right_hip_pitch_joint"] = STAND_HIP_PITCH
+        default[".*_knee_joint"]         = STAND_KNEE
+        default[".*_ankle_pitch_joint"]  = STAND_ANKLE
+        self.scene.robot.init_state.joint_pos = default
 
-        # ==== 終了条件 ====
-        # 偶発的な pelvis 接触では終了しない(深しゃがみで pelvis がふとした瞬間触れても続行)
-        self.terminations.base_contact = None
-        # 明らかに転倒したら終了
+        # --- 転倒は「罰」ではなく「終了」で扱う ---
+        self.terminations.base_contact = None          # 偶発的な骨盤接触では終了しない
         self.terminations.fell_over = DoneTerm(
             func=mdp.bad_orientation,
-            params=dict(limit_angle=1.2),   # 約 69°
+            params=dict(limit_angle=1.0),              # 約 57 度傾いたら終了
+        )
+        self.terminations.collapsed = DoneTerm(
+            func=mdp.root_height_below_minimum,
+            params=dict(minimum_height=0.28,
+                        asset_cfg=SceneEntityCfg("robot")),
         )
 
-        print(">>> PeriodicSquat: period={}s, warm-start=default(standing)".format(SQUAT_PERIOD))
-        print(">>> terminations: base_contact=disabled, fell_over=bad_orientation(1.2)")
+        print(f">>> PeriodicSquat v2: period={SQUAT_PERIOD}s  "
+              f"knee {STAND_KNEE}->{SQUAT_KNEE}  h {STAND_HEIGHT}->{SQUAT_HEIGHT}")
 
 
 @configclass
