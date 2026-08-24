@@ -368,3 +368,31 @@ def leg_symmetry_penalty(
     d_pitch = q_pitch[:, 0] - q_pitch[:, 1]     
     d_knee = q_knee[:, 0] - q_knee[:, 1]
     return -(d_roll ** 2 + d_pitch ** 2 + d_knee ** 2)
+
+
+# ---------------------------------------------------------------------------
+# Unconditional posture rewards (linear, always-on gradient)
+# ---------------------------------------------------------------------------
+
+def base_height_low(
+    env: "ManagerBasedRLEnv",
+    max_height: float = 0.78,
+    min_height: float = 0.40,
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    robot: Articulation = env.scene[robot_cfg.name]
+    h = robot.data.root_pos_w[:, 2]
+    return ((max_height - h) / (max_height - min_height)).clamp(0.0, 1.0)
+
+
+def knee_bent(
+    env: "ManagerBasedRLEnv",
+    robot_cfg: SceneEntityCfg = SceneEntityCfg(
+        "robot",
+        joint_names=["left_knee_joint", "right_knee_joint"],
+    ),
+    max_angle: float = 1.6,
+) -> torch.Tensor:
+    robot: Articulation = env.scene[robot_cfg.name]
+    q = robot.data.joint_pos[:, robot_cfg.joint_ids]
+    return q.clamp(0.0, max_angle).mean(dim=-1)
