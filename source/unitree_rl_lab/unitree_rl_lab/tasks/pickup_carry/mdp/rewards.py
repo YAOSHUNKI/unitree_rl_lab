@@ -19,6 +19,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import torch
+import math
 
 from isaaclab.assets import Articulation, RigidObject
 from isaaclab.managers import SceneEntityCfg
@@ -396,3 +397,62 @@ def knee_bent(
     robot: Articulation = env.scene[robot_cfg.name]
     q = robot.data.joint_pos[:, robot_cfg.joint_ids]
     return q.clamp(0.0, max_angle).mean(dim=-1)
+
+# ---------------------------------------------------------------------------
+# Periodic squat-stand cycle 
+# ---------------------------------------------------------------------------
+def _squat_phase(env: "ManagerBasedRLEnv", period: float) -> torch.Tensor:
+    return ((env.episode_length_buf * env.step_dt) % period) / period
+
+
+def periodic_squat_height(
+    env: "ManagerBasedRLEnv",
+    period: float = 3.0,
+    stand_height: float = 0.75,
+    squat_height: float = 0.50,
+    std: float = 0.06,
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    robot: Articulation = env.scene[robot_cfg.name]
+    phi = _squat_phase(env, period)                              
+    mid = 0.5 * (stand_height + squat_height)
+    amp = 0.5 * (stand_height - squat_height)
+    target = mid + amp * torch.cos(2 * math.pi * phi)              
+
+    h = robot.data.root_pos_w[:, 2]
+    err = h - target
+    return torch.exp(-(err * err) / (std * std))
+
+
+def periodic_knee_bend(
+    env: "ManagerBasedRLEnv",
+    period: float = 3.0,
+    stand_knee: float = 0.1,
+    squat_knee: float = 1.3,
+    std: float = 0.25,
+    robot_cfg: SceneEntityCfg = SceneEntityCfg(
+        "robot", joint_names=["left_knee_joint", "right_knee_joint"]
+    ),
+) -> torch.Tensor:
+    robot: Articulation = env.scene[robot_cfg.name]
+    phi = _squat_phase(env, period)
+    mid = 0.5 * (stand_knee + squat_knee)
+    amp = 0.5 * (squat_knee - stand_knee)
+    target = mid - amp * torch.cos(2 * math.pi * phi)   
+
+    q = robot.data.joint_pos[:, robot_cfg.joint_ids].mean(dim=-1)
+    err = q - target
+    return torch.exp(-(err * err) / (std * std))
+
+
+def squat_motion_penalty(
+    env: "ManagerBasedRLEnv",
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    freeze_penalty: float = 0.5,
+) -> torch.Tensor:
+    
+    robot: Articulation = env.scene[robot_cfg.name]
+    vz = torch.abs(robot.data.root_lin_vel_w[:, 2])
+    # vz < 0.05 m/s 
+    is_frozen = (vz < 0.05).float()
+    return -freeze_penalty * is_frozen

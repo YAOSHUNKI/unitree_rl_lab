@@ -27,23 +27,22 @@ gym.register(
     },
 )
 
-# ----- SquatOnly ------------------------------------------------
+# ----- PeriodicSquat ------------------------------------------------
 gym.register(
-    id="Unitree-G1-29dof-SquatOnly",
+    id="Unitree-G1-29dof-PeriodicSquat",
     entry_point="isaaclab.envs:ManagerBasedRLEnv",
     disable_env_checker=True,
     kwargs={
-        "env_cfg_entry_point": "unitree_rl_lab.tasks.pickup_carry.robots.g1.29dof.squat_only_env_cfg:G1SquatOnlyEnvCfg",
+        "env_cfg_entry_point": "unitree_rl_lab.tasks.pickup_carry.robots.g1.29dof.squat_only_env_cfg:G1PeriodicSquatEnvCfg",
         "rsl_rl_cfg_entry_point": "unitree_rl_lab.tasks.pickup_carry.agents.rsl_rl_ppo_cfg:G1PickupCarryPPORunnerCfg",
     },
 )
-
 gym.register(
-    id="Unitree-G1-29dof-SquatOnly-Play",
+    id="Unitree-G1-29dof-PeriodicSquat-Play",
     entry_point="isaaclab.envs:ManagerBasedRLEnv",
     disable_env_checker=True,
     kwargs={
-        "env_cfg_entry_point": "unitree_rl_lab.tasks.pickup_carry.robots.g1.29dof.squat_only_env_cfg:G1SquatOnlyEnvCfg_PLAY",
+        "env_cfg_entry_point": "unitree_rl_lab.tasks.pickup_carry.robots.g1.29dof.squat_only_env_cfg:G1PeriodicSquatEnvCfg_PLAY",
         "rsl_rl_cfg_entry_point": "unitree_rl_lab.tasks.pickup_carry.agents.rsl_rl_ppo_cfg:G1PickupCarryPPORunnerCfg",
     },
 )

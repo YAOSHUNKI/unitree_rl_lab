@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import torch
+import math
 
 from isaaclab.assets import RigidObject
 from isaaclab.managers import SceneEntityCfg
@@ -91,3 +92,9 @@ def hand_contact_flags(
     f = torch.linalg.norm(cs.data.net_forces_w[:, sensor_cfg.body_ids, :], dim=-1)
     return (f > force_threshold).float()
 
+def squat_phase_obs(
+    env: "ManagerBasedRLEnv",
+    period: float = 3.0,
+) -> torch.Tensor:
+    phi = ((env.episode_length_buf * env.step_dt) % period) / period
+    return torch.stack([torch.sin(2 * math.pi * phi), torch.cos(2 * math.pi * phi)], dim=-1)

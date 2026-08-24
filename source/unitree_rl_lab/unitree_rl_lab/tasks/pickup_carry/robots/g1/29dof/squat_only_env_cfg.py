@@ -1,49 +1,53 @@
 from __future__ import annotations
 
+from isaaclab.managers import ObservationTermCfg as ObsTerm
 from isaaclab.managers import RewardTermCfg as RewTerm
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.utils import configclass
 
 import unitree_rl_lab.tasks.pickup_carry.mdp as mdp
-from .pickup_carry_env_cfg import (
-    G1PickupCarryEnvCfg,
-    FOOT_BODY_REGEX,
-)
+from .pickup_carry_env_cfg import G1PickupCarryEnvCfg, FOOT_BODY_REGEX
+
+SQUAT_PERIOD = 3.0   # 秒。1周期で「立ち→しゃがみ→立ち」
 
 
 @configclass
-class SquatOnlyRewardsCfg:
-    # --- コア: しゃがみ ---
-    squat = RewTerm(
-        func=mdp.squat_when_near_box, weight=5.0,   # ← 大きめ
-        params=dict(target_height=0.55, near_threshold=10.0, std=0.08),
-        # near_threshold を 10m にして「常時ON」に。箱位置に関係なくしゃがませる
+class PeriodicSquatRewardsCfg:
+    # --- 周期的スクワット(主報酬) ---
+    periodic_height = RewTerm(
+        func=mdp.periodic_squat_height, weight=10.0,
+        params=dict(period=SQUAT_PERIOD, stand_height=0.75, squat_height=0.50, std=0.06),
+    )
+    periodic_knee = RewTerm(
+        func=mdp.periodic_knee_bend, weight=5.0,
+        params=dict(period=SQUAT_PERIOD, stand_knee=0.1, squat_knee=1.3, std=0.25),
+    )
+    no_freeze = RewTerm(
+        func=mdp.squat_motion_penalty, weight=1.0,
+        params=dict(freeze_penalty=0.5),
     )
 
-    # --- 姿勢の質: 膝で下げる、脚を開かない ---
-    knee_flex = RewTerm(
-        func=mdp.knee_flexion_when_squatting, weight=3.0,
-        params=dict(target_knee_angle=1.2, std=0.3, near_threshold=10.0),
-    )
+    # --- 姿勢の質 ---
     feet_width = RewTerm(
-        func=mdp.feet_lateral_distance_penalty, weight=3.0,
-        params=dict(max_stance_width=0.28, foot_body_names=[FOOT_BODY_REGEX]),
+        func=mdp.feet_lateral_distance_penalty, weight=1.0,
+        params=dict(max_stance_width=0.30, foot_body_names=[FOOT_BODY_REGEX]),
     )
-    hip_abduct = RewTerm(func=mdp.hip_abduction_penalty, weight=1.0)
-    leg_sym = RewTerm(func=mdp.leg_symmetry_penalty, weight=0.5)
+    hip_abduct = RewTerm(func=mdp.hip_abduction_penalty, weight=0.5)
+    leg_sym    = RewTerm(func=mdp.leg_symmetry_penalty, weight=0.3)
 
-    # --- 生存と最低限の正則化 ---
-    alive = RewTerm(func=mdp.is_alive, weight=1.0)          # 大きめに(倒れないでいる)
-    lin_vel_z = RewTerm(func=mdp.lin_vel_z_l2, weight=-1.0)
-    ang_vel_xy = RewTerm(func=mdp.ang_vel_xy_l2, weight=-0.05)
-    action_rate = RewTerm(func=mdp.action_rate_l2, weight=-0.005)
-    joint_acc = RewTerm(func=mdp.joint_acc_l2, weight=-2.5e-7)
-    joint_torque = RewTerm(func=mdp.joint_torques_l2, weight=-1.0e-5)
-    dof_pos_lim = RewTerm(func=mdp.joint_pos_limits, weight=-2.0)
+    # --- 転倒防止 ---
+    flat_orient = RewTerm(func=mdp.flat_orientation_l2, weight=-3.0)
 
-    # 腕はデフォルト姿勢に固定(邪魔しないように強めに)
+    # --- 正則化(弱め) ---
+    lin_vel_z    = RewTerm(func=mdp.lin_vel_z_l2, weight=-0.1)   # ← しゃがみ中の上下動を許すため弱く
+    ang_vel_xy   = RewTerm(func=mdp.ang_vel_xy_l2, weight=-0.02)
+    action_rate  = RewTerm(func=mdp.action_rate_l2, weight=-0.001)
+    joint_acc    = RewTerm(func=mdp.joint_acc_l2, weight=-1.0e-7)
+    joint_torque = RewTerm(func=mdp.joint_torques_l2, weight=-1.0e-6)
+    dof_pos_lim  = RewTerm(func=mdp.joint_pos_limits, weight=-2.0)
+
     arm_default = RewTerm(
-        func=mdp.joint_deviation_l1, weight=-0.5,   
+        func=mdp.joint_deviation_l1, weight=-0.5,
         params=dict(
             asset_cfg=SceneEntityCfg(
                 "robot", joint_names=[".*_shoulder_.*", ".*_elbow_.*", ".*_wrist_.*"]
@@ -53,23 +57,29 @@ class SquatOnlyRewardsCfg:
 
 
 @configclass
-class G1SquatOnlyEnvCfg(G1PickupCarryEnvCfg):
-    rewards: SquatOnlyRewardsCfg = SquatOnlyRewardsCfg()
+class G1PeriodicSquatEnvCfg(G1PickupCarryEnvCfg):
+    rewards: PeriodicSquatRewardsCfg = PeriodicSquatRewardsCfg()
 
     def __post_init__(self):
         super().__post_init__()
-        # 速度指令はゼロに固定(移動学習を止める)
+        # 速度指令ゼロ固定
         self.commands.base_velocity.ranges.lin_vel_x = (0.0, 0.0)
         self.commands.base_velocity.ranges.lin_vel_y = (0.0, 0.0)
         self.commands.base_velocity.ranges.ang_vel_z = (0.0, 0.0)
         self.commands.base_velocity.rel_standing_envs = 1.0
 
-        # エピソードを短くしてサンプル効率UP
-        self.episode_length_s = 6.0
+        # 周期の整数倍にするとカリキュラム的に扱いやすい(9秒 = 3周期)
+        self.episode_length_s = 9.0
+
+        # 位相を観測に加える
+        self.observations.policy.squat_phase = ObsTerm(
+            func=mdp.squat_phase_obs,
+            params=dict(period=SQUAT_PERIOD),
+        )
 
 
 @configclass
-class G1SquatOnlyEnvCfg_PLAY(G1SquatOnlyEnvCfg):
+class G1PeriodicSquatEnvCfg_PLAY(G1PeriodicSquatEnvCfg):
     def __post_init__(self):
         super().__post_init__()
         self.scene.num_envs = 16
