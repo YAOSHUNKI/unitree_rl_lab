@@ -463,3 +463,42 @@ def knee_flexion_when_squatting(
     q = robot.data.joint_pos[:, robot_cfg.joint_ids]
     err = q.mean(dim=-1) - target_knee_angle
     return near * torch.exp(-(err * err) / (std * std))
+
+# ---------- 転倒(寝転がり)ペナルティ ----------
+
+
+def upright_bonus(
+    env: "ManagerBasedRLEnv",
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """胴体が上向きに立っているほど良い。
+
+    projected_gravity_b[:, 2] は立位で -1、横倒しで 0、逆さまで +1。
+    (1 - g_z) / 2 で 立位=1, 横倒=0.5, 逆さま=0 になる。
+    しゃがみの前傾程度なら 0.7〜0.9 くらい残る。
+    """
+    robot: RigidObject = env.scene[robot_cfg.name]
+    g_z = robot.data.projected_gravity_b[:, 2]  # 立位で -1
+    return (1.0 - g_z) * 0.5
+
+
+def fallen_penalty(
+    env: "ManagerBasedRLEnv",
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    tilt_threshold: float = -0.3,   # g_z がこれより大きい(=より水平)ならペナルティ
+    height_threshold: float = 0.30,  # pelvis がこれより低いとペナルティ
+) -> torch.Tensor:
+    """明らかに寝転がっているとき大きな負の報酬。
+
+    - tilt_threshold=-0.3: g_z が -0.3 より大きい(=約72°以上傾いている)
+    - height_threshold=0.30: pelvis が 30cm 以下(=寝てる/座り込み)
+    どちらかを満たせばペナルティ。
+    """
+    robot: RigidObject = env.scene[robot_cfg.name]
+    g_z = robot.data.projected_gravity_b[:, 2]
+    h = robot.data.root_pos_w[:, 2]
+
+    too_tilted = (g_z > tilt_threshold).float()
+    too_low = (h < height_threshold).float()
+    return -(too_tilted + too_low)   # 両方満たせば -2、片方で -1
+
