@@ -23,36 +23,54 @@ def __post_init__(self):
     for k in ["left_ankle_pitch_joint", "right_ankle_pitch_joint"]:
         default[k] = -0.3
     self.scene.robot.init_state.joint_pos = default
-    
+
 @configclass
 class PeriodicSquatRewardsCfg:
-    # --- 周期的スクワット(主報酬) ---
-    periodic_height = RewTerm(
-        func=mdp.periodic_squat_height, weight=10.0,
-        params=dict(period=SQUAT_PERIOD, stand_height=0.75, squat_height=0.50, std=0.06),
+    # === 主報酬: 膝を曲げること (常時ON, リニア) ===
+    knee_bent  = RewTerm(func=mdp.knee_bent_reward, weight=8.0)
+    hip_pitch  = RewTerm(func=mdp.hip_pitch_bent_reward, weight=4.0)
+
+    # === 周期目標 (立ち↔しゃがみの動きを強制) ===
+    period_height = RewTerm(
+        func=mdp.periodic_height_target, weight=6.0,
+        params=dict(period=3.0, stand_height=0.75, squat_height=0.50, std=0.08),
     )
-    periodic_knee = RewTerm(
-        func=mdp.periodic_knee_bend, weight=5.0,
-        params=dict(period=SQUAT_PERIOD, stand_knee=0.1, squat_knee=1.3, std=0.25),
+    period_knee = RewTerm(
+        func=mdp.periodic_knee_target, weight=4.0,
+        params=dict(period=3.0, stand_knee=0.1, squat_knee=1.3),
     )
-    no_freeze = RewTerm(
-        func=mdp.squat_motion_penalty, weight=1.0,
-        params=dict(freeze_penalty=0.5),
+    period_hip = RewTerm(
+        func=mdp.periodic_hip_pitch_target, weight=2.0,
+        params=dict(period=3.0, stand_hip=0.0, squat_hip=-0.7),
     )
 
-    # --- 姿勢の質(桁を上げる) ---
+    # === 高さ報酬 (膝ゲート付き。開脚で下げても報酬ゼロ) ===
+    height_gated = RewTerm(
+        func=mdp.height_low_gated_by_knee, weight=4.0,
+        params=dict(max_height=0.78, min_height=0.40, knee_gate_min=0.5),
+    )
+
+    # === 開脚抑制 (多角的) ===
+    hip_abduct   = RewTerm(func=mdp.hip_abduction_penalty, weight=5.0)
+    hip_roll_mag = RewTerm(func=mdp.hip_roll_magnitude_penalty, weight=5.0)
     feet_width = RewTerm(
-        func=mdp.feet_lateral_distance_penalty, weight=10.0,   # 1.0 → 10.0
+        func=mdp.feet_lateral_distance_penalty, weight=10.0,
         params=dict(max_stance_width=0.25, foot_body_names=[FOOT_BODY_REGEX]),
-        #                          ↑ 0.30 → 0.25 (許容を狭める)
     )
-    hip_abduct = RewTerm(func=mdp.hip_abduction_penalty, weight=5.0)   # 0.5 → 5.0
+    leg_sym = RewTerm(func=mdp.leg_symmetry_penalty, weight=0.3)
 
-    # --- 転倒防止 ---
+    # === 姿勢 & 足浮き ===
     flat_orient = RewTerm(func=mdp.flat_orientation_l2, weight=-3.0)
+    feet_air = RewTerm(
+        func=mdp.feet_air_time_penalty, weight=1.0,
+        params=dict(
+            sensor_cfg=SceneEntityCfg("foot_contact", body_names=[FOOT_BODY_REGEX]),
+            grace_period=0.2,
+        ),
+    )
 
-    # --- 正則化(弱め) ---
-    lin_vel_z    = RewTerm(func=mdp.lin_vel_z_l2, weight=-0.1)   # ← しゃがみ中の上下動を許すため弱く
+    # === 正則化 ===
+    lin_vel_z    = RewTerm(func=mdp.lin_vel_z_l2, weight=-0.1)
     ang_vel_xy   = RewTerm(func=mdp.ang_vel_xy_l2, weight=-0.02)
     action_rate  = RewTerm(func=mdp.action_rate_l2, weight=-0.001)
     joint_acc    = RewTerm(func=mdp.joint_acc_l2, weight=-1.0e-7)
@@ -61,13 +79,10 @@ class PeriodicSquatRewardsCfg:
 
     arm_default = RewTerm(
         func=mdp.joint_deviation_l1, weight=-0.5,
-        params=dict(
-            asset_cfg=SceneEntityCfg(
-                "robot", joint_names=[".*_shoulder_.*", ".*_elbow_.*", ".*_wrist_.*"]
-            )
-        ),
+        params=dict(asset_cfg=SceneEntityCfg(
+            "robot", joint_names=[".*_shoulder_.*", ".*_elbow_.*", ".*_wrist_.*"]
+        )),
     )
-
 
 @configclass
 class G1PeriodicSquatEnvCfg(G1PickupCarryEnvCfg):
