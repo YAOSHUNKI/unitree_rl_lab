@@ -98,3 +98,4 @@ def squat_phase_obs(
 ) -> torch.Tensor:
     phi = ((env.episode_length_buf * env.step_dt) % period) / period
     return torch.stack([torch.sin(2 * math.pi * phi), torch.cos(2 * math.pi * phi)], dim=-1)
+
