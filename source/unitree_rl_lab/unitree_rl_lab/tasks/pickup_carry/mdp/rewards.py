@@ -501,3 +501,15 @@ def hip_roll_magnitude_penalty(
     robot: Articulation = env.scene[robot_cfg.name]
     q = robot.data.joint_pos[:, robot_cfg.joint_ids]
     return -q.abs().sum(dim=-1)
+
+def feet_off_ground_penalty(
+    env: "ManagerBasedRLEnv",
+    sensor_cfg: SceneEntityCfg = SceneEntityCfg("foot_contact", body_names=[".*_ankle_roll_link"]),
+    force_threshold: float = 1.0,
+) -> torch.Tensor:
+    """接地していない足の数だけリニアにペナルティ (両足浮き=-2, 片足浮き=-1)。"""
+    cs: ContactSensor = env.scene.sensors[sensor_cfg.name]
+    forces = torch.linalg.norm(cs.data.net_forces_w[:, sensor_cfg.body_ids, :], dim=-1)
+    in_contact = (forces > force_threshold).float()   # (N, 2)
+    off_ground = 2.0 - in_contact.sum(dim=-1)         # 0 / 1 / 2
+    return -off_ground
