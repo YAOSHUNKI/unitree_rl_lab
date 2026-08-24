@@ -10,7 +10,20 @@ from .pickup_carry_env_cfg import G1PickupCarryEnvCfg, FOOT_BODY_REGEX
 
 SQUAT_PERIOD = 3.0   # 秒。1周期で「立ち→しゃがみ→立ち」
 
+def __post_init__(self):
+    super().__post_init__()
+    # ... 既存の設定 ...
 
+    # 初期姿勢を半しゃがみに(膝の存在をロボットに知らせる)
+    default = dict(self.scene.robot.init_state.joint_pos)
+    for k in ["left_hip_pitch_joint", "right_hip_pitch_joint"]:
+        default[k] = -0.3
+    for k in ["left_knee_joint", "right_knee_joint"]:
+        default[k] = 0.6
+    for k in ["left_ankle_pitch_joint", "right_ankle_pitch_joint"]:
+        default[k] = -0.3
+    self.scene.robot.init_state.joint_pos = default
+    
 @configclass
 class PeriodicSquatRewardsCfg:
     # --- 周期的スクワット(主報酬) ---
