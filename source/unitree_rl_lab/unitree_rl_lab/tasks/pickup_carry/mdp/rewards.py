@@ -456,3 +456,48 @@ def squat_motion_penalty(
     # vz < 0.05 m/s 
     is_frozen = (vz < 0.05).float()
     return -freeze_penalty * is_frozen
+
+def periodic_squat_height(
+    env: "ManagerBasedRLEnv",
+    period: float = 3.0,
+    stand_height: float = 0.75,
+    squat_height: float = 0.50,
+    std: float = 0.06,
+    # --- 膝ゲート ---
+    knee_gate_min: float = 0.4,          # squat期でこの角度以上曲がってないと報酬ゼロ
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    knee_cfg: SceneEntityCfg = SceneEntityCfg(
+        "robot", joint_names=["left_knee_joint", "right_knee_joint"]
+    ),
+) -> torch.Tensor:
+    """胴体高さが目標に追従＋膝が十分曲がっているときのみ報酬。"""
+    robot: Articulation = env.scene[robot_cfg.name]
+    phi = _squat_phase(env, period)
+    mid = 0.5 * (stand_height + squat_height)
+    amp = 0.5 * (stand_height - squat_height)
+    target = mid + amp * torch.cos(2 * math.pi * phi)
+
+    h = robot.data.root_pos_w[:, 2]
+    err = h - target
+    height_score = torch.exp(-(err * err) / (std * std))
+
+    # squat期の深さ(0=立ち, 1=しゃがみ)
+    squat_depth = 0.5 - 0.5 * torch.cos(2 * math.pi * phi)  # 0..1
+
+    # 膝が要求角度以上曲がっているか(squat期のみ厳しく)
+    knee = robot.data.joint_pos[:, knee_cfg.joint_ids].mean(dim=-1)
+    required_knee = squat_depth * knee_gate_min  # 立ち期は0でOK、しゃがみ期は0.4以上要求
+    knee_ok = torch.sigmoid(10.0 * (knee - required_knee))  # 満たすほど1、そうでないと0
+
+    return height_score * knee_ok
+
+def hip_roll_magnitude_penalty(
+    env: "ManagerBasedRLEnv",
+    robot_cfg: SceneEntityCfg = SceneEntityCfg(
+        "robot", joint_names=["left_hip_roll_joint", "right_hip_roll_joint"],
+    ),
+) -> torch.Tensor:
+    """hip_roll の絶対値の和(=どちらか一方でも外転していたらペナルティ)。"""
+    robot: Articulation = env.scene[robot_cfg.name]
+    q = robot.data.joint_pos[:, robot_cfg.joint_ids]
+    return -q.abs().sum(dim=-1)

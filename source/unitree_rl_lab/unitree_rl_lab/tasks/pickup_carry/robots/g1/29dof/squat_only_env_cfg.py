@@ -27,13 +27,13 @@ class PeriodicSquatRewardsCfg:
         params=dict(freeze_penalty=0.5),
     )
 
-    # --- 姿勢の質 ---
+    # --- 姿勢の質(桁を上げる) ---
     feet_width = RewTerm(
-        func=mdp.feet_lateral_distance_penalty, weight=1.0,
-        params=dict(max_stance_width=0.30, foot_body_names=[FOOT_BODY_REGEX]),
+        func=mdp.feet_lateral_distance_penalty, weight=10.0,   # 1.0 → 10.0
+        params=dict(max_stance_width=0.25, foot_body_names=[FOOT_BODY_REGEX]),
+        #                          ↑ 0.30 → 0.25 (許容を狭める)
     )
-    hip_abduct = RewTerm(func=mdp.hip_abduction_penalty, weight=0.5)
-    leg_sym    = RewTerm(func=mdp.leg_symmetry_penalty, weight=0.3)
+    hip_abduct = RewTerm(func=mdp.hip_abduction_penalty, weight=5.0)   # 0.5 → 5.0
 
     # --- 転倒防止 ---
     flat_orient = RewTerm(func=mdp.flat_orientation_l2, weight=-3.0)
