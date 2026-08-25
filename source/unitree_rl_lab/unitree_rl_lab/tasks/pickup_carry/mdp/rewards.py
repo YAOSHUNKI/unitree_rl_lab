@@ -751,3 +751,91 @@ def stance_width_penalty(
         env, target_width=target_width, std=std, robot_cfg=robot_cfg
     ) - 1.0
 
+# ---------------------------------------------------------------------------
+# v3: 手を前に出す / 左右対称 / 胴を正面に向ける
+# ---------------------------------------------------------------------------
+
+
+def _hands_in_yaw_frame(
+    env: "ManagerBasedRLEnv",
+    hand_cfg: SceneEntityCfg,
+) -> torch.Tensor:
+    """骨盤原点・ヨーのみ揃えた座標系での手の位置 (N, 2, 3)。
+
+    yaw_quat を使うので「前(x)」は胴が前傾していても水平前方を指す。
+    関節角の符号規約に依存しないので、USD の定義を調べなくても意図を書ける。
+    """
+    robot: Articulation = env.scene[hand_cfg.name]
+    hands_w = robot.data.body_pos_w[:, hand_cfg.body_ids, :]          # (N, 2, 3)
+    rel_w = hands_w - robot.data.root_pos_w.unsqueeze(1)              # (N, 2, 3)
+
+    n_hand = rel_w.shape[1]
+    q = yaw_quat(robot.data.root_quat_w).unsqueeze(1).expand(-1, n_hand, -1)
+    rel_b = quat_apply_inverse(q.reshape(-1, 4), rel_w.reshape(-1, 3))
+    return rel_b.reshape(rel_w.shape)
+
+
+def hands_forward_tracking(
+    env: "ManagerBasedRLEnv",
+    period: float = 6.0,
+    stand_x: float = 0.05,
+    squat_x: float = 0.30,
+    stand_z: float = -0.15,
+    squat_z: float = -0.10,
+    std: float = 0.25,
+    hand_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """しゃがむにつれて両手が前方へ出るほど良い [0, 1]。
+
+    骨盤から見た手の (前後 x, 上下 z) を位相に応じた目標に追従させる。
+    左右どちらの手も同じ目標なので、この項自体が対称性も促す。
+
+    NOTE: stand_x / stand_z は G1 の腕の自然位置の推定値。
+          PLAY で実測して合わせると精度が上がる。
+    """
+    depth = _squat_depth(env, period)
+    rel_b = _hands_in_yaw_frame(env, hand_cfg)                        # (N, 2, 3)
+
+    tx = (stand_x + (squat_x - stand_x) * depth).unsqueeze(-1)        # (N, 1)
+    tz = (stand_z + (squat_z - stand_z) * depth).unsqueeze(-1)
+
+    err = (rel_b[:, :, 0] - tx) ** 2 + (rel_b[:, :, 2] - tz) ** 2     # (N, 2)
+    return torch.exp(-err.mean(dim=-1) / (std * std))
+
+
+def hands_symmetry_penalty(
+    env: "ManagerBasedRLEnv",
+    std: float = 0.10,
+    hand_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """両手が左右対称でないほどマイナス [-1, 0]。
+
+    対称の定義 (骨盤ヨー座標系):
+      前後 x : 左右で一致  -> 差が 0
+      左右 y : 符号が反転  -> 和が 0
+      上下 z : 左右で一致  -> 差が 0
+    すべて絶対値/二乗で見るので body_ids の左右の並び順に依存しない。
+    """
+    rel_b = _hands_in_yaw_frame(env, hand_cfg)
+    d_fwd = rel_b[:, 0, 0] - rel_b[:, 1, 0]
+    d_lat = rel_b[:, 0, 1] + rel_b[:, 1, 1]
+    d_up = rel_b[:, 0, 2] - rel_b[:, 1, 2]
+    err = d_fwd ** 2 + d_lat ** 2 + d_up ** 2
+    return torch.exp(-err / (std * std)) - 1.0
+
+
+def torso_roll_penalty(
+    env: "ManagerBasedRLEnv",
+    std: float = 0.15,
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """胴の左右傾き(ロール)だけを罰する [-1, 0]。
+
+    projected_gravity_b = (gx, gy, gz)。前傾すると gx が動き、
+    左右に傾くと gy が動く。gy だけを見るので、
+    深いスクワットに必要な前傾(ピッチ)は一切罰しない。
+    """
+    robot: Articulation = env.scene[robot_cfg.name]
+    g_y = robot.data.projected_gravity_b[:, 1]
+    return torch.exp(-(g_y * g_y) / (std * std)) - 1.0
+
