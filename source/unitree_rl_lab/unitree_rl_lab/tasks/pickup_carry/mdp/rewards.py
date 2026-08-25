@@ -839,3 +839,72 @@ def torso_roll_penalty(
     g_y = robot.data.projected_gravity_b[:, 1]
     return torch.exp(-(g_y * g_y) / (std * std)) - 1.0
 
+# ---------------------------------------------------------------------------
+# v4: 開脚の専用抑制 (pose_track の lateral 項では弱すぎたため独立させる)
+# ---------------------------------------------------------------------------
+# 深いスクワットは narrow stance だと踏ん張れないので、開脚が「安い抜け道」
+# になる。pose_track の lateral 項はグループ内平均なので他の関節に薄められ、
+# 単独では抑止力が足りない。そこで専用項として切り出す。
+#
+# ただし完全に 0 を要求するのは非現実的: 大腿が水平近くまで来る深さでは、
+# 人間でも脚をやや開かないと胴の入るスペースがない。
+# そこで「深さに応じた妥当な開き」を目標にし、それを超えた分を強く罰する。
+# ---------------------------------------------------------------------------
+
+
+def hip_abduction_tracking(
+    env: "ManagerBasedRLEnv",
+    period: float = 6.0,
+    stand_abduction: float = 0.00,
+    squat_abduction: float = 0.18,
+    std: float = 0.12,
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """hip_roll の開き量が深さ相応かどうか [-1, 0]。
+
+    |hip_roll| の平均を使うので左右の符号規約に依存しない。
+    立ち位相では 0、完全しゃがみでは squat_abduction (約10度) までを許容し、
+    それを「超えた分」だけマイナス (閉じている分は罰しない)。
+    std が狭いので大きな開脚は即 -1 に飽和する。
+
+    NOTE: robot_cfg は hip_roll だけを含む SceneEntityCfg を params で渡すこと。
+    """
+    robot: Articulation = env.scene[robot_cfg.name]
+    depth = _squat_depth(env, period)
+    target = stand_abduction + (squat_abduction - stand_abduction) * depth
+
+    abd = robot.data.joint_pos[:, robot_cfg.joint_ids].abs().mean(dim=-1)
+    # 片側のみ: 目標より閉じている分は罰しない (clamp(min=0))。
+    # 両側にすると「脚を閉じた棒立ち」が減点され、開脚を促してしまう。
+    excess = (abd - target).clamp(min=0.0)
+    return torch.exp(-(excess * excess) / (std * std)) - 1.0
+
+
+def stance_width_penalty_phased(
+    env: "ManagerBasedRLEnv",
+    period: float = 6.0,
+    stand_width: float = 0.20,
+    squat_width: float = 0.28,
+    std: float = 0.08,
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """足の左右間隔が深さ相応かどうか [-1, 0]。
+
+    固定目標版 (stance_width_penalty) と違い、しゃがむにつれて
+    わずかな足幅拡大を許容する。許容幅を超えた分のみ罰する (片側)。
+
+    NOTE: robot_cfg は足の body_names を含む SceneEntityCfg を params で渡すこと。
+    """
+    robot: Articulation = env.scene[robot_cfg.name]
+    depth = _squat_depth(env, period)
+    target = stand_width + (squat_width - stand_width) * depth
+
+    feet_w = robot.data.body_pos_w[:, robot_cfg.body_ids, :]      # (N, 2, 3)
+    rel = feet_w[:, 0, :] - feet_w[:, 1, :]
+    rel_b = quat_apply_inverse(yaw_quat(robot.data.root_quat_w), rel)
+    width = torch.abs(rel_b[:, 1])
+
+    # 片側のみ: 目標より狭い分は罰しない。
+    excess = (width - target).clamp(min=0.0)
+    return torch.exp(-(excess * excess) / (std * std)) - 1.0
+
