@@ -60,18 +60,26 @@ STAND_HEIGHT, SQUAT_HEIGHT = 0.73, 0.33
 # === 手の参照位置 (骨盤原点・ヨー座標系) ====================================
 # x = 前方 / z = 上下。関節角ではなく位置で指定するので符号規約に依存しない。
 # NOTE: STAND_* は G1 の腕の自然位置の推定値。PLAY で実測して合わせると精度が上がる。
-STAND_HAND_X, SQUAT_HAND_X = 0.05, 0.30   # しゃがむと手が前に出る
-STAND_HAND_Z, SQUAT_HAND_Z = -0.15, -0.10
+STAND_HAND_X, SQUAT_HAND_X = 0.05, 0.35   # しゃがむと手が前に出る
+STAND_HAND_Z, SQUAT_HAND_Z = -0.15, -0.20  # 同時に下がる (骨盤0.33m時 -> 地上0.13m)
+
+# === 開脚の許容量 ===========================================================
+# 完全に 0 は非現実的 (大腿が水平近くまで来ると胴の入るスペースが要る)。
+# 深さ相応のわずかな開きだけ許し、それを超えたら強く罰する。
+STAND_ABDUCTION, SQUAT_ABDUCTION = 0.00, 0.18   # |hip_roll| [rad] (約10度)
+STAND_WIDTH,     SQUAT_WIDTH     = 0.20, 0.28   # 足の左右間隔 [m]
 
 # === SceneEntityCfg (必ず params で渡す) ====================================
 HIP_PITCH_CFG = SceneEntityCfg("robot", joint_names=[".*_hip_pitch_joint"])
 KNEE_CFG      = SceneEntityCfg("robot", joint_names=[".*_knee_joint"])
 ANKLE_CFG     = SceneEntityCfg("robot", joint_names=[".*_ankle_pitch_joint"])
-# 0 に固定したい関節: 開脚(hip_roll)・脚のねじれ(hip_yaw)・胴のねじれと横傾き(waist)
+# 0 に固定したい関節: 脚のねじれ(hip_yaw)・胴のねじれと横傾き(waist)
 # waist_pitch は前傾に使うので入れない。
+# hip_roll(開脚) はここに入れると平均で薄まるので専用項 HIP_ROLL_CFG に分離した。
 LATERAL_CFG   = SceneEntityCfg("robot", joint_names=[
-    ".*_hip_roll_joint", ".*_hip_yaw_joint", "waist_yaw_joint", "waist_roll_joint",
+    ".*_hip_yaw_joint", "waist_yaw_joint", "waist_roll_joint",
 ])
+HIP_ROLL_CFG  = SceneEntityCfg("robot", joint_names=[".*_hip_roll_joint"])
 FEET_BODY_CFG   = SceneEntityCfg("robot", body_names=[FOOT_BODY_REGEX])
 HAND_BODY_CFG   = SceneEntityCfg("robot", body_names=[HAND_BODY_REGEX])
 FOOT_SENSOR_CFG = SceneEntityCfg("foot_contact", body_names=[FOOT_BODY_REGEX])
@@ -112,9 +120,9 @@ class PeriodicSquatRewardsCfg:
     )
     # しゃがむにつれて両手を前へ
     hands_forward = RewTerm(
-        func=mdp.hands_forward_tracking, weight=2.0,
+        func=mdp.hands_forward_tracking, weight=3.0,
         params=dict(
-            period=SQUAT_PERIOD, std=0.25,
+            period=SQUAT_PERIOD, std=0.13,
             stand_x=STAND_HAND_X, squat_x=SQUAT_HAND_X,
             stand_z=STAND_HAND_Z, squat_z=SQUAT_HAND_Z,
             hand_cfg=HAND_BODY_CFG,
@@ -130,7 +138,7 @@ class PeriodicSquatRewardsCfg:
         params=dict(sensor_cfg=FOOT_SENSOR_CFG, force_threshold=1.0),
     )
 
-    # ================= ペナルティ: 崩れるとマイナス (最小 -7.0) =================
+    # ================= ペナルティ: 崩れるとマイナス (最小 -12.0) =================
     # すべて値域 [-1, 0]。静止・対称・正面向きなら 0 なので「タダ取り」できない。
     drift_pen = RewTerm(
         func=mdp.drift_penalty, weight=1.5,
@@ -160,9 +168,22 @@ class PeriodicSquatRewardsCfg:
         func=mdp.base_speed_penalty, weight=0.5,
         params=dict(std=0.30, robot_cfg=SceneEntityCfg("robot")),
     )
+    # --- 開脚抑制 (深いスクワットでは開脚が「安い抜け道」になるので強く) ---
+    hip_abduction_pen = RewTerm(
+        func=mdp.hip_abduction_tracking, weight=6.0,
+        params=dict(
+            period=SQUAT_PERIOD, std=0.12,
+            stand_abduction=STAND_ABDUCTION, squat_abduction=SQUAT_ABDUCTION,
+            robot_cfg=HIP_ROLL_CFG,
+        ),
+    )
     stance_pen = RewTerm(
-        func=mdp.stance_width_penalty, weight=0.5,
-        params=dict(target_width=0.20, std=0.12, robot_cfg=FEET_BODY_CFG),
+        func=mdp.stance_width_penalty_phased, weight=5.0,
+        params=dict(
+            period=SQUAT_PERIOD, std=0.08,
+            stand_width=STAND_WIDTH, squat_width=SQUAT_WIDTH,
+            robot_cfg=FEET_BODY_CFG,
+        ),
     )
 
     # ================= 正則化 =================
@@ -177,7 +198,8 @@ class PeriodicSquatRewardsCfg:
         params=dict(asset_cfg=SceneEntityCfg("robot", joint_names=[".*_wrist_.*"])),
     )
     # 棒立ち   : 約 5.5 / 18.0
-    # スクワット: 約 11.7 / 18.0   -> 比 2.13 倍
+    # 正しいスクワット: 約 11.5 / 18.0
+    # 開脚スクワット  : 約 6.0  (開脚ペナルティ -5.5 で相殺)
 
 
 @configclass
