@@ -608,3 +608,77 @@ def feet_stance_width(
     err = width - target_width
     return torch.exp(-(err * err) / (std * std))
 
+# ---------------------------------------------------------------------------
+# その場に留まる (定位置保持) 報酬 -- すべて [0, 1] の正値
+# ---------------------------------------------------------------------------
+
+
+def stay_in_place(
+    env: "ManagerBasedRLEnv",
+    std: float = 0.25,
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """スポーン位置(env原点)からの水平ドリフトが小さいほど良い [0, 1]。
+
+    std=0.25 なら 25cm ずれて 0.37、50cm ずれて 0.02 まで落ちる。
+    """
+    robot: Articulation = env.scene[robot_cfg.name]
+    offset = robot.data.root_pos_w[:, :2] - env.scene.env_origins[:, :2]
+    d_sq = (offset * offset).sum(dim=-1)
+    return torch.exp(-d_sq / (std * std))
+
+
+def low_base_speed(
+    env: "ManagerBasedRLEnv",
+    std: float = 0.30,
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """胴体の水平速度が小さいほど良い [0, 1]。
+
+    上下(z)は見ないのでスクワットの沈み込み/立ち上がりは阻害しない。
+    """
+    robot: Articulation = env.scene[robot_cfg.name]
+    v_sq = (robot.data.root_lin_vel_b[:, :2] ** 2).sum(dim=-1)
+    return torch.exp(-v_sq / (std * std))
+
+
+def heading_hold(
+    env: "ManagerBasedRLEnv",
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """初期のヨー向き(world +x)を保っているほど良い [0, 1]。
+
+    yaw-only クォータニオン (w,0,0,z) に対し cos(yaw) = 2w^2 - 1。
+    正面向きで 1.0、90度回って 0.5、真後ろで 0.0。
+    """
+    robot: Articulation = env.scene[robot_cfg.name]
+    w = yaw_quat(robot.data.root_quat_w)[:, 0]
+    cos_yaw = (2.0 * w * w - 1.0).clamp(-1.0, 1.0)
+    return (cos_yaw + 1.0) * 0.5
+
+
+def feet_no_slip(
+    env: "ManagerBasedRLEnv",
+    std: float = 0.15,
+    force_threshold: float = 1.0,
+    sensor_cfg: SceneEntityCfg = SceneEntityCfg("foot_contact"),
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """接地している足が滑っていないほど良い [0, 1]。
+
+    ドリフトの物理的な原因はほぼこれ。接地中の足だけ水平速度を見るので、
+    遊脚(浮いている足)の動きは罰しない。
+    """
+    robot: Articulation = env.scene[asset_cfg.name]
+    cs: ContactSensor = env.scene.sensors[sensor_cfg.name]
+
+    forces = torch.linalg.norm(cs.data.net_forces_w[:, sensor_cfg.body_ids, :], dim=-1)
+    in_contact = (forces > force_threshold).float()                      # (N, 2)
+
+    foot_v = torch.linalg.norm(
+        robot.data.body_lin_vel_w[:, asset_cfg.body_ids, :2], dim=-1
+    )                                                                    # (N, 2)
+
+    slip_sq = ((in_contact * foot_v) ** 2).sum(dim=-1)
+    return torch.exp(-slip_sq / (std * std))
+

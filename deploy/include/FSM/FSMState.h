@@ -9,8 +9,8 @@
 class FSMState : public BaseState
 {
 public:
-    FSMState(int state, std::string state_string) 
-    : BaseState(state, state_string) 
+    FSMState(int state, std::string state_string)
+    : BaseState(state, state_string)
     {
         spdlog::info("Initializing State_{} ...", state_string);
 
@@ -38,6 +38,43 @@ public:
                 registered_checks.emplace_back(
                     std::make_pair(
                         [func]()->bool{ return func(FSMState::lowstate->joystick); },
+                        fsm_id
+                    )
+                );
+            }
+        }
+
+        // keyboard-triggered transitions (usable without a gamepad).
+        // Example in config.yaml:
+        //   transitions_key:
+        //     FixStand: "2"
+        //     Velocity: "3"
+        // A transition fires on the rising edge of the given terminal key
+        // (the key must be pressed in the g1_ctrl terminal window).
+        auto transitions_key = param::config["FSM"][state_string]["transitions_key"];
+        if(transitions_key)
+        {
+            auto tk_map = transitions_key.as<std::map<std::string, std::string>>();
+
+            for(auto it = tk_map.begin(); it != tk_map.end(); ++it)
+            {
+                std::string target_fsm = it->first;
+                if(!FSMStringMap.right.count(target_fsm))
+                {
+                    spdlog::warn("FSM State_'{}' not found in FSMStringMap!", target_fsm);
+                    continue;
+                }
+
+                int fsm_id = FSMStringMap.right.at(target_fsm);
+                std::string kc = it->second;
+
+                registered_checks.emplace_back(
+                    std::make_pair(
+                        [kc]()->bool{
+                            return FSMState::keyboard
+                                && FSMState::keyboard->on_pressed
+                                && FSMState::keyboard->key() == kc;
+                        },
                         fsm_id
                     )
                 );
