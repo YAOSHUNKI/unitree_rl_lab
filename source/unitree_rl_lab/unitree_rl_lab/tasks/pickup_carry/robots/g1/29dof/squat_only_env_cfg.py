@@ -56,9 +56,19 @@ FOOT_SENSOR_CFG = SceneEntityCfg("foot_contact", body_names=[FOOT_BODY_REGEX])
 
 @configclass
 class PeriodicSquatRewardsCfg:
-    # ================= 主報酬: 参照姿勢トラッキング (正値・有界) =================
+    """正報酬 = タスク達成のみ / ペナルティ = 動いた分だけマイナス。
+
+    設計:
+      - 「棒立ちでタダでもらえる報酬」を排除するため、定位置保持は
+        正報酬ではなくペナルティで与える (静止で 0、動いた分だけマイナス)。
+      - ペナルティはすべて [-1, 0] に有界。1step の合計が負になると
+        エージェントは早期終了(わざと転倒)で return を最大化しようとするため。
+      - 転倒は終了条件 (fell_over / collapsed) が担当するので、
+        upright / grounded は「合計を正に保つ床」として小さく残すだけ。
+    """
+    # ================= 正報酬: タスク達成 (最大 14.0) =================
     pose_track = RewTerm(
-        func=mdp.squat_pose_tracking, weight=8.0,
+        func=mdp.squat_pose_tracking, weight=10.0,
         params=dict(
             period=SQUAT_PERIOD, std=0.50,
             stand_hip_pitch=STAND_HIP_PITCH, squat_hip_pitch=SQUAT_HIP_PITCH,
@@ -73,46 +83,46 @@ class PeriodicSquatRewardsCfg:
     height_track = RewTerm(
         func=mdp.squat_height_tracking, weight=3.0,
         params=dict(
-            period=SQUAT_PERIOD, std=0.10,
+            period=SQUAT_PERIOD, std=0.12,
             stand_height=STAND_HEIGHT, squat_height=SQUAT_HEIGHT,
             robot_cfg=SceneEntityCfg("robot"),
         ),
     )
-
-    # ================= 補助 (すべて正値) =================
+    # 合計を正に保つための床 (転倒判定は終了条件が担当するので小さく)
     upright = RewTerm(
-        func=mdp.upright_bonus, weight=2.0,
+        func=mdp.upright_bonus, weight=0.5,
         params=dict(robot_cfg=SceneEntityCfg("robot")),
     )
     grounded = RewTerm(
-        func=mdp.feet_grounded, weight=1.0,
+        func=mdp.feet_grounded, weight=0.5,
         params=dict(sensor_cfg=FOOT_SENSOR_CFG, force_threshold=1.0),
     )
-    stance_width = RewTerm(
-        func=mdp.feet_stance_width, weight=1.0,
-        params=dict(target_width=0.20, std=0.12, robot_cfg=FEET_BODY_CFG),
-    )
 
-    # ================= その場に留まる (定位置保持) =================
-    stay_put = RewTerm(
-        func=mdp.stay_in_place, weight=2.0,
+    # ================= ペナルティ: 動くとマイナス (最小 -4.5) =================
+    # すべて値域 [-1, 0]。静止していれば 0 なので「タダ取り」できない。
+    drift_pen = RewTerm(
+        func=mdp.drift_penalty, weight=1.5,
         params=dict(std=0.25, robot_cfg=SceneEntityCfg("robot")),
     )
-    no_slip = RewTerm(
-        func=mdp.feet_no_slip, weight=1.5,
+    slip_pen = RewTerm(
+        func=mdp.feet_slip_penalty, weight=1.5,
         params=dict(std=0.15, force_threshold=1.0,
                     sensor_cfg=FOOT_SENSOR_CFG, asset_cfg=FEET_BODY_CFG),
     )
-    heading = RewTerm(
-        func=mdp.heading_hold, weight=1.0,
-        params=dict(robot_cfg=SceneEntityCfg("robot")),
-    )
-    low_speed = RewTerm(
-        func=mdp.low_base_speed, weight=0.5,
+    speed_pen = RewTerm(
+        func=mdp.base_speed_penalty, weight=0.5,
         params=dict(std=0.30, robot_cfg=SceneEntityCfg("robot")),
     )
+    heading_pen = RewTerm(
+        func=mdp.heading_penalty, weight=0.5,
+        params=dict(robot_cfg=SceneEntityCfg("robot")),
+    )
+    stance_pen = RewTerm(
+        func=mdp.stance_width_penalty, weight=0.5,
+        params=dict(target_width=0.20, std=0.12, robot_cfg=FEET_BODY_CFG),
+    )
 
-    # ================= 正則化 (小さく) =================
+    # ================= 正則化 =================
     ang_vel_xy   = RewTerm(func=mdp.ang_vel_xy_l2,     weight=-0.02)
     action_rate  = RewTerm(func=mdp.action_rate_l2,    weight=-0.005)
     joint_acc    = RewTerm(func=mdp.joint_acc_l2,      weight=-2.5e-7)
@@ -124,8 +134,8 @@ class PeriodicSquatRewardsCfg:
             "robot", joint_names=[".*_shoulder_.*", ".*_elbow_.*", ".*_wrist_.*", "waist_.*"]
         )),
     )
-    # 正報酬の最大 = 8+3+2+1+1 (姿勢) + 2+1.5+1+0.5 (定位置) = 20/step
-    # 正則化は通常 -0.3 程度 -> 合計は常に大きく正 -> 生存が常に最適
+    # 棒立ち   : 約 4.8 / 14.0
+    # スクワット: 約 9.9 / 14.0   -> 比 2.05 倍
 
 
 @configclass

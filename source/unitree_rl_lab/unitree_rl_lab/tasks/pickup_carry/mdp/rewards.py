@@ -682,3 +682,72 @@ def feet_no_slip(
     slip_sq = ((in_contact * foot_v) ** 2).sum(dim=-1)
     return torch.exp(-slip_sq / (std * std))
 
+# ---------------------------------------------------------------------------
+# 定位置保持 -- ペナルティ版 (動くとマイナス)
+# ---------------------------------------------------------------------------
+# 正報酬版 (stay_in_place など) は「棒立ちで満点」なので、何もしないだけで
+# 報酬を稼げてしまう。ペナルティ版なら静止で 0、動いた分だけマイナス。
+#
+# すべて -(1 - exp(-x^2/std^2)) の形で値域 [-1, 0] に有界化してある。
+# 有界にするのは重要: 1step あたりの合計が負になると、エージェントは
+# 「早く終了した方が得」と判断してわざと転倒するようになる。
+# ---------------------------------------------------------------------------
+
+
+def drift_penalty(
+    env: "ManagerBasedRLEnv",
+    std: float = 0.25,
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """スポーン位置から水平にずれた分だけマイナス [-1, 0]。
+
+    静止で 0、25cm ずれて -0.63、50cm ずれて -0.98。
+    """
+    return stay_in_place(env, std=std, robot_cfg=robot_cfg) - 1.0
+
+
+def base_speed_penalty(
+    env: "ManagerBasedRLEnv",
+    std: float = 0.30,
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """胴体の水平速度の分だけマイナス [-1, 0]。上下(z)は見ない。"""
+    return low_base_speed(env, std=std, robot_cfg=robot_cfg) - 1.0
+
+
+def heading_penalty(
+    env: "ManagerBasedRLEnv",
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """初期のヨー向きからずれた分だけマイナス [-1, 0]。"""
+    return heading_hold(env, robot_cfg=robot_cfg) - 1.0
+
+
+def feet_slip_penalty(
+    env: "ManagerBasedRLEnv",
+    std: float = 0.15,
+    force_threshold: float = 1.0,
+    sensor_cfg: SceneEntityCfg = SceneEntityCfg("foot_contact"),
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """接地している足が滑った分だけマイナス [-1, 0]。
+
+    ドリフトの物理的な原因はほぼこれ。遊脚は見ないので踏み替え自体は罰しない。
+    """
+    return feet_no_slip(
+        env, std=std, force_threshold=force_threshold,
+        sensor_cfg=sensor_cfg, asset_cfg=asset_cfg,
+    ) - 1.0
+
+
+def stance_width_penalty(
+    env: "ManagerBasedRLEnv",
+    target_width: float = 0.20,
+    std: float = 0.12,
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """足幅が target_width からずれた分だけマイナス [-1, 0]。"""
+    return feet_stance_width(
+        env, target_width=target_width, std=std, robot_cfg=robot_cfg
+    ) - 1.0
+
