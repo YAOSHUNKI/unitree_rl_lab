@@ -16,8 +16,10 @@ FSM:
       type: Mimic
 
   Passive:
-    transitions: 
+    transitions:
       FixStand: LT + up.on_pressed
+    transitions_key:      # keyboard (press in the g1_ctrl terminal)
+      FixStand: "2"
     mode: [
       1,1,1,1,1,1,
       1,1,1,1,1,1,
@@ -29,13 +31,16 @@ FSM:
       3,3,3,3,3,3,
       3,3,3,3,3,3,
       3,3,3,
-      3,3,3,3,3,3,3,  
-      3,3,3,3,3,3,3,  
+      3,3,3,3,3,3,3,
+      3,3,3,3,3,3,3,
     ]
   FixStand:
-    transitions: 
+    transitions:
       Passive: LT + B.on_pressed
       Velocity: RB + X.on_pressed
+    transitions_key:      # keyboard (press in the g1_ctrl terminal)
+      Passive: "1"
+      Velocity: "3"
     kp: [
       100., 100., 100., 150., 40., 40.,
       100., 100., 100., 150., 40., 40.,
@@ -61,15 +66,17 @@ FSM:
       ]
     ]
   Velocity:
-    transitions: 
+    transitions:
       Passive: LT + B.on_pressed
       Mimic_Dance_102: LT(2s) + down.on_pressed
       Mimic_Gangnam_Style: LT(2s) + left.on_pressed
+    transitions_key:      # keyboard (press in the g1_ctrl terminal)
+      Passive: "1"
 
     policy_dir: config/policy/velocity
     # policy_dir: ../../../logs/rsl_rl/unitree_g1_29dof_velocity
   Mimic_Dance_102:
-    transitions: 
+    transitions:
       Passive: LT + B.on_pressed
       Velocity: RB + X.on_pressed
     fps: 60
@@ -78,7 +85,7 @@ FSM:
     time_start: 2.8
     time_end: 24.0
   Mimic_Gangnam_Style:
-    transitions: 
+    transitions:
       Passive: LT + B.on_pressed
       Velocity: RB + X.on_pressed
     fps: 60
@@ -86,4 +93,3 @@ FSM:
     policy_dir: config/policy/mimic/gangnam_style/
     time_start: 5.2
     time_end: 25.5
-

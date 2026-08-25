@@ -31,12 +31,18 @@ from .pickup_carry_env_cfg import G1PickupCarryEnvCfg, FOOT_BODY_REGEX
 # --- チューニングノブ ------------------------------------------------------
 SQUAT_PERIOD = 6.0        # 秒 / 1周期 (3秒かけて下がり、3秒かけて上がる)
 
-STAND_HIP_PITCH, SQUAT_HIP_PITCH = -0.10, -0.95
-STAND_KNEE,      SQUAT_KNEE      = 0.30, 1.50
-STAND_ANKLE,     SQUAT_ANKLE     = -0.20, -0.55
-# 上記は hip_pitch + knee + ankle_pitch = 0 を満たす -> 胴体が垂直のまま沈む
+STAND_HIP_PITCH, SQUAT_HIP_PITCH = -0.10, -1.50
+STAND_KNEE,      SQUAT_KNEE      = 0.30, 2.00
+STAND_ANKLE,     SQUAT_ANKLE     = -0.20, -0.70
+# hip_pitch + knee + ankle_pitch が胴体ピッチを決める:
+#   立ち  : -0.10 + 0.30 - 0.20 =  0.00  -> 垂直
+#   しゃがみ: -1.50 + 2.00 - 0.70 = -0.20  -> 前傾 11.5 度
+# 深いスクワットは前傾しないと重心が後ろに抜けて転ぶので意図的に負にしている。
 
-STAND_HEIGHT, SQUAT_HEIGHT = 0.74, 0.52
+# 骨盤高さ = 0.6*cos(knee/2) + 0.13  (大腿 0.30m / 下腿 0.30m の運動学から)
+#   knee 0.30 -> 0.73 m
+#   knee 2.00 -> 0.45 m
+STAND_HEIGHT, SQUAT_HEIGHT = 0.73, 0.45
 # ---------------------------------------------------------------------------
 
 # SceneEntityCfg は必ず params で渡す (下で使い回す)
@@ -52,7 +58,7 @@ FOOT_SENSOR_CFG = SceneEntityCfg("foot_contact", body_names=[FOOT_BODY_REGEX])
 class PeriodicSquatRewardsCfg:
     # ================= 主報酬: 参照姿勢トラッキング (正値・有界) =================
     pose_track = RewTerm(
-        func=mdp.squat_pose_tracking, weight=6.0,
+        func=mdp.squat_pose_tracking, weight=8.0,
         params=dict(
             period=SQUAT_PERIOD, std=0.50,
             stand_hip_pitch=STAND_HIP_PITCH, squat_hip_pitch=SQUAT_HIP_PITCH,
@@ -87,6 +93,25 @@ class PeriodicSquatRewardsCfg:
         params=dict(target_width=0.20, std=0.12, robot_cfg=FEET_BODY_CFG),
     )
 
+    # ================= その場に留まる (定位置保持) =================
+    stay_put = RewTerm(
+        func=mdp.stay_in_place, weight=2.0,
+        params=dict(std=0.25, robot_cfg=SceneEntityCfg("robot")),
+    )
+    no_slip = RewTerm(
+        func=mdp.feet_no_slip, weight=1.5,
+        params=dict(std=0.15, force_threshold=1.0,
+                    sensor_cfg=FOOT_SENSOR_CFG, asset_cfg=FEET_BODY_CFG),
+    )
+    heading = RewTerm(
+        func=mdp.heading_hold, weight=1.0,
+        params=dict(robot_cfg=SceneEntityCfg("robot")),
+    )
+    low_speed = RewTerm(
+        func=mdp.low_base_speed, weight=0.5,
+        params=dict(std=0.30, robot_cfg=SceneEntityCfg("robot")),
+    )
+
     # ================= 正則化 (小さく) =================
     ang_vel_xy   = RewTerm(func=mdp.ang_vel_xy_l2,     weight=-0.02)
     action_rate  = RewTerm(func=mdp.action_rate_l2,    weight=-0.005)
@@ -99,7 +124,7 @@ class PeriodicSquatRewardsCfg:
             "robot", joint_names=[".*_shoulder_.*", ".*_elbow_.*", ".*_wrist_.*", "waist_.*"]
         )),
     )
-    # 正報酬の最大 = 6 + 3 + 2 + 1 + 1 = 13/step
+    # 正報酬の最大 = 8+3+2+1+1 (姿勢) + 2+1.5+1+0.5 (定位置) = 20/step
     # 正則化は通常 -0.3 程度 -> 合計は常に大きく正 -> 生存が常に最適
 
 
@@ -137,11 +162,11 @@ class G1PeriodicSquatEnvCfg(G1PickupCarryEnvCfg):
         self.terminations.base_contact = None          # 偶発的な骨盤接触では終了しない
         self.terminations.fell_over = DoneTerm(
             func=mdp.bad_orientation,
-            params=dict(limit_angle=1.0),              # 約 57 度傾いたら終了
+            params=dict(limit_angle=1.2),              # 約 69 度傾いたら終了(深い前傾を許容)
         )
         self.terminations.collapsed = DoneTerm(
             func=mdp.root_height_below_minimum,
-            params=dict(minimum_height=0.28,
+            params=dict(minimum_height=0.25,
                         asset_cfg=SceneEntityCfg("robot")),
         )
 
