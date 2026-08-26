@@ -1058,3 +1058,55 @@ def arm_extension_penalty(
     shortfall = torch.exp(-(deficit * deficit) / (std * std)) - 1.0
     return depth * shortfall
 
+# ---------------------------------------------------------------------------
+# v7: 腕を「前方へ振る」 (肩関節を動かす動機を直接与える)
+# ---------------------------------------------------------------------------
+# hands_at_knee_front は手の「到達点」を目標にしていたが、
+#   - 目標が腕の長さの外にあると勾配が薄くなる
+#   - 腕を真下に垂らしていても部分点が入る
+# ため、肩を回す動機が弱かった。
+#
+# ここでは腕の「向き」そのものを報酬にする:
+#
+#     forward = (手 - 肩) の単位ベクトルの前方(x)成分
+#
+#   腕を真下に垂らす      -> 0.00
+#   鉛直から 37 度前へ振る -> 0.60
+#   鉛直から 53 度前へ振る -> 0.80
+#   真横(水平)に前へ伸ばす -> 1.00
+#
+# 向きなので必ず到達可能。全域で単調な勾配が出るため、肩関節を回す方向へ
+# 素直に学習が進む。腕の長さもリンク数も知らなくてよい。
+# ---------------------------------------------------------------------------
+
+
+def arm_forward_direction(
+    env: "ManagerBasedRLEnv",
+    period: float = 6.0,
+    stand_forward: float = 0.00,
+    squat_forward: float = 0.65,
+    std: float = 0.15,
+    shoulder_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    hand_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """腕(肩->手)がどれだけ前方を向いているか [0, 1]。
+
+    立ち位相では真下(0.0)、しゃがみ切りでは squat_forward を目標にする。
+    左右それぞれで誤差を取ってから平均するので、片腕だけ前に出して
+    平均でごまかす解が成立しない。
+
+    NOTE: shoulder_cfg / hand_cfg は body_names を持つ SceneEntityCfg を
+          params で渡すこと。
+    """
+    depth = _squat_depth(env, period)
+
+    sh = _sorted_by_lateral(_bodies_in_yaw_frame(env, shoulder_cfg))   # (N, 2, 3)
+    hd = _sorted_by_lateral(_bodies_in_yaw_frame(env, hand_cfg))
+
+    v = hd - sh                                                        # (N, 2, 3)
+    fwd = v[:, :, 0] / (torch.linalg.norm(v, dim=-1) + 1e-6)           # (N, 2)
+
+    target = (stand_forward + (squat_forward - stand_forward) * depth).unsqueeze(-1)
+    err_sq = ((fwd - target) ** 2).mean(dim=-1)
+    return torch.exp(-err_sq / (std * std))
+

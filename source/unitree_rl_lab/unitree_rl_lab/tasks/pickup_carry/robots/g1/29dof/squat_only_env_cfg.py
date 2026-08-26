@@ -62,10 +62,12 @@ STAND_HEIGHT, SQUAT_HEIGHT = 0.73, 0.33
 # NOTE: STAND_* は G1 の腕の自然位置の推定値。PLAY で実測して合わせると精度が上がる。
 # 基準は骨盤ではなく「膝リンク」。しゃがみと一緒に膝が前下方へ動くので、
 # 深さが変わってもオフセットの意味が変わらない。
-STAND_HAND_FWD, SQUAT_HAND_FWD = 0.03, 0.15   # 膝より何m前に手を出すか
-STAND_HAND_UP,  SQUAT_HAND_UP  = 0.20,  0.00  # 膝より何m上に手を置くか
-# NOTE: SQUAT_HAND_UP を下げすぎると「腕を伸ばす」と両立しない。
-#       伸ばした腕(肩から約0.42m)で自然に届くのは膝より +0.04m 前後。
+STAND_HAND_FWD, SQUAT_HAND_FWD = 0.03, 0.18   # 膝より何m前に手を出すか
+STAND_HAND_UP,  SQUAT_HAND_UP  = 0.20,  0.08  # 膝より何m上に手を置くか
+# NOTE: 上記は「腕を伸ばして前方 0.65 に振った」ときの手の到達点の推定値。
+#       SQUAT_ARM_FWD を変えたらここも合わせないと2つの報酬が競合する。
+# 腕(肩->手)の前方成分。0=真下, 0.65=鉛直から37度前, 1.0=水平前方
+STAND_ARM_FWD,  SQUAT_ARM_FWD  = 0.00,  0.65
 HAND_WIDTH_SCALE = 1.0                        # 手の間隔 = 膝の間隔 x これ
 HAND_WIDTH_MIN   = 0.16                       # 立ち位相でも最低これだけ開く [m]
 
@@ -107,7 +109,7 @@ _POSE_PARAMS = dict(
 
 @configclass
 class PeriodicSquatRewardsCfg:
-    # ================= 正報酬: タスク達成 (最大 21.0) =================
+    # ================= 正報酬: タスク達成 (最大 24.0) =================
     # 姿勢追従は 2段構え。
     #   coarse(std 0.85): 目標から遠くても勾配が残る -> 学習初期の誘導
     #   fine  (std 0.35): 精度を出さないと入らない   -> 収束後の精度
@@ -129,12 +131,21 @@ class PeriodicSquatRewardsCfg:
     )
     # しゃがむにつれて両手を「膝の前」へ
     hands_knee_front = RewTerm(
-        func=mdp.hands_at_knee_front, weight=3.0,
+        func=mdp.hands_at_knee_front, weight=2.0,
         params=dict(
             period=SQUAT_PERIOD, std=0.16,
             stand_forward=STAND_HAND_FWD, squat_forward=SQUAT_HAND_FWD,
             stand_up=STAND_HAND_UP,       squat_up=SQUAT_HAND_UP,
             hand_cfg=HAND_BODY_CFG, knee_cfg=KNEE_BODY_CFG,
+        ),
+    )
+    # 腕を前方へ振る (肩関節を動かす動機。位置目標より勾配が素直)
+    arm_forward = RewTerm(
+        func=mdp.arm_forward_direction, weight=4.0,
+        params=dict(
+            period=SQUAT_PERIOD, std=0.15,
+            stand_forward=STAND_ARM_FWD, squat_forward=SQUAT_ARM_FWD,
+            shoulder_cfg=SHOULDER_CFG, hand_cfg=HAND_BODY_CFG,
         ),
     )
     # 両手の間隔を「膝幅」に合わせる
@@ -275,6 +286,7 @@ class G1PeriodicSquatEnvCfg(G1PickupCarryEnvCfg):
         print(f"    height {STAND_HEIGHT} -> {SQUAT_HEIGHT} m")
         print(f"    hand   膝より {STAND_HAND_FWD} -> {SQUAT_HAND_FWD} m 前 / "
               f"{STAND_HAND_UP} -> {SQUAT_HAND_UP} m 上, 間隔=膝幅")
+        print(f"    arm    前方成分 {STAND_ARM_FWD} -> {SQUAT_ARM_FWD}")
 
 
 @configclass
