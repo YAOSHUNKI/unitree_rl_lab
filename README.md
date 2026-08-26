@@ -1,16 +1,92 @@
 # Unitree RL Lab
 
-[![IsaacSim](https://img.shields.io/badge/IsaacSim-5.1.0-silver.svg)](https://docs.omniverse.nvidia.com/isaacsim/latest/overview.html)
-[![Isaac Lab](https://img.shields.io/badge/IsaacLab-2.3.0-silver)](https://isaac-sim.github.io/IsaacLab)
-[![License](https://img.shields.io/badge/license-Apache2.0-yellow.svg)](https://opensource.org/license/apache-2-0)
-[![Discord](https://img.shields.io/badge/-Discord-5865F2?style=flat&logo=Discord&logoColor=white)](https://discord.gg/ZwcVwxv5rq)
+## 参照
 
+[unitree_rl_lab](https://github.com/unitreerobotics/unitree_rl_lab) \
+[IsaacLab2.3.0](https://isaac-sim.github.io/IsaacLab/v2.3.0/source/setup/installation/index.html)
 
-## Overview
+## 目標タスク
 
-This project provides a set of reinforcement learning environments for Unitree robots, built on top of [IsaacLab](https://github.com/isaac-sim/IsaacLab).
+原子炉建屋内での瓦礫撤去
+Unitree G1の強化学習による開発
+- 瓦礫までの移動
+- 瓦礫をピックアップするために腰を下ろす動作
+- 瓦礫を掴む
+- 立ち上がる
 
-Currently supports Unitree **Go2**, **H1** and **G1-29dof** robots.
+## 作業内容
+
+### 開発環境の構築
+既存のIsaac Labのインストール手順では依存関係で問題が発生するため修正した手順を記す. 
+- Install Isaac Lab 2.3.0 + Isaac Sim 5.1
+  
+  - conda環境の作成
+    ```bash
+    conda create -n env_isaaclab python=3.11 -y
+    conda activate env_isaaclab
+    pip install --upgrade pip
+    ```
+
+  - pkg_resources問題を回避するためにsetuptoolsをpln
+    ```bash
+    pip install "setuptools<81" wheel
+    ```
+
+  - build isolation を回避するためflatdict を先に手動 installする
+    ```bash
+    pip install flatdict==4.0.1 --no-build-isolation
+    ```
+     
+  - Isaac Sim 5.1をinstall
+    ```bash
+    PIP_CONSTRAINT=<(echo "setuptools<81")
+    pip install "isaacsim[all,extscache]==5.1.0" --extra-index-url https://pypi.nvidia.com
+    ```
+     
+   - PyTorch (cu128) を install
+     ```bash
+     pip install torch==2.7.0 torchvision==0.22.0 torchaudio==2.7.0 
+     --index-url https://download.pytorch.org/whl/cu128
+     ```
+     
+   - Isaac Sim 動作確認
+     ```bash
+     isaacsim
+     # 初回起動は時間がかかる
+     ```
+     
+   - Isaac Lab clone & checkout
+     ```bash
+     cd ~
+     git clone https://github.com/isaac-sim/IsaacLab.git
+     cd IsaacLab
+     git checkout v2.3.0  
+     sudo apt install -y cmake build-essential
+     ```
+
+   - Isaac Lab を editable install
+     ```bash
+     ./isaaclab.sh --install
+     ```
+     
+   - torch と Isaac Sim pin を復元
+     ```bash
+     # torch を 2.7.0 に戻す 
+     pip install torch==2.7.0 torchvision==0.22.0 torchaudio==2.7.0 \
+     --index-url https://download.pytorch.org/whl/cu128
+
+     # isaacsim-kernel の pin 要件を復元
+     pip install "click==8.1.7" "typing_extensions==4.12.2" "psutil==5.9.8"
+
+     # stable-baselines3 を torch 2.7 対応版に 
+     pip install "stable-baselines3==2.6.0"
+     ```
+     
+   - 動作確認
+     ```bash
+     ./isaaclab.sh -p scripts/tutorials/00_sim/create_empty.py
+     ```
+
 
 <div align="center">
 
@@ -20,70 +96,8 @@ Currently supports Unitree **Go2**, **H1** and **G1-29dof** robots.
 
 </div>
 
-## Installation
-
-- Install Isaac Lab by following the [installation guide](https://isaac-sim.github.io/IsaacLab/main/source/setup/installation/index.html).
-- Install the Unitree RL IsaacLab standalone environments.
-
-  - Clone or copy this repository separately from the Isaac Lab installation (i.e. outside the `IsaacLab` directory):
-
-    ```bash
-    git clone https://github.com/unitreerobotics/unitree_rl_lab.git
-    ```
-  - Use a python interpreter that has Isaac Lab installed, install the library in editable mode using:
-
-    ```bash
-    conda activate env_isaaclab
-    ./unitree_rl_lab.sh -i
-    # restart your shell to activate the environment changes.
-    ```
-- Download unitree robot description files
-
-  *Method 1: Using USD Files*
-  - Download unitree usd files from [unitree_model](https://huggingface.co/datasets/unitreerobotics/unitree_model/tree/main), keeping folder structure
-    ```bash
-    git clone https://huggingface.co/datasets/unitreerobotics/unitree_model
-    ```
-  - Config `UNITREE_MODEL_DIR` in `source/unitree_rl_lab/unitree_rl_lab/assets/robots/unitree.py`.
-
-    ```bash
-    UNITREE_MODEL_DIR = "</home/user/projects/unitree_usd>"
-    ```
-
-  *Method 2: Using URDF Files [Recommended]* Only for Isaacsim >= 5.0
-  -  Download unitree robot urdf files from [unitree_ros](https://github.com/unitreerobotics/unitree_ros)
-      ```
-      git clone https://github.com/unitreerobotics/unitree_ros.git
-      ```
-  - Config `UNITREE_ROS_DIR` in `source/unitree_rl_lab/unitree_rl_lab/assets/robots/unitree.py`.
-    ```bash
-    UNITREE_ROS_DIR = "</home/user/projects/unitree_ros/unitree_ros>"
-    ```
-  - [Optional]: change *robot_cfg.spawn* if you want to use urdf files
 
 
-
-- Verify that the environments are correctly installed by:
-
-  - Listing the available tasks:
-
-    ```bash
-    ./unitree_rl_lab.sh -l # This is a faster version than isaaclab
-    ```
-  - Running a task:
-
-    ```bash
-    ./unitree_rl_lab.sh -t --task Unitree-G1-29dof-Velocity # support for autocomplete task-name
-    # same as
-    python scripts/rsl_rl/train.py --headless --task Unitree-G1-29dof-Velocity
-    ```
-  - Inference with a trained agent:
-
-    ```bash
-    ./unitree_rl_lab.sh -p --task Unitree-G1-29dof-Velocity # support for autocomplete task-name
-    # same as
-    python scripts/rsl_rl/play.py --task Unitree-G1-29dof-Velocity
-    ```
 
 ## Deploy
 
