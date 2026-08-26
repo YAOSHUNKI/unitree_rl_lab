@@ -63,7 +63,9 @@ STAND_HEIGHT, SQUAT_HEIGHT = 0.73, 0.33
 # 基準は骨盤ではなく「膝リンク」。しゃがみと一緒に膝が前下方へ動くので、
 # 深さが変わってもオフセットの意味が変わらない。
 STAND_HAND_FWD, SQUAT_HAND_FWD = 0.03, 0.15   # 膝より何m前に手を出すか
-STAND_HAND_UP,  SQUAT_HAND_UP  = 0.20, -0.10  # 膝より何m上に手を置くか
+STAND_HAND_UP,  SQUAT_HAND_UP  = 0.20,  0.00  # 膝より何m上に手を置くか
+# NOTE: SQUAT_HAND_UP を下げすぎると「腕を伸ばす」と両立しない。
+#       伸ばした腕(肩から約0.42m)で自然に届くのは膝より +0.04m 前後。
 HAND_WIDTH_SCALE = 1.0                        # 手の間隔 = 膝の間隔 x これ
 HAND_WIDTH_MIN   = 0.16                       # 立ち位相でも最低これだけ開く [m]
 
@@ -87,6 +89,8 @@ HIP_ROLL_CFG  = SceneEntityCfg("robot", joint_names=[".*_hip_roll_joint"])
 FEET_BODY_CFG   = SceneEntityCfg("robot", body_names=[FOOT_BODY_REGEX])
 HAND_BODY_CFG   = SceneEntityCfg("robot", body_names=[HAND_BODY_REGEX])
 KNEE_BODY_CFG   = SceneEntityCfg("robot", body_names=[".*_knee_link"])
+SHOULDER_CFG    = SceneEntityCfg("robot", body_names=[".*_shoulder_yaw_link"])
+ELBOW_CFG       = SceneEntityCfg("robot", body_names=[".*_elbow_link"])
 FOOT_SENSOR_CFG = SceneEntityCfg("foot_contact", body_names=[FOOT_BODY_REGEX])
 
 _POSE_PARAMS = dict(
@@ -127,7 +131,7 @@ class PeriodicSquatRewardsCfg:
     hands_knee_front = RewTerm(
         func=mdp.hands_at_knee_front, weight=3.0,
         params=dict(
-            period=SQUAT_PERIOD, std=0.12,
+            period=SQUAT_PERIOD, std=0.16,
             stand_forward=STAND_HAND_FWD, squat_forward=SQUAT_HAND_FWD,
             stand_up=STAND_HAND_UP,       squat_up=SQUAT_HAND_UP,
             hand_cfg=HAND_BODY_CFG, knee_cfg=KNEE_BODY_CFG,
@@ -152,7 +156,7 @@ class PeriodicSquatRewardsCfg:
         params=dict(sensor_cfg=FOOT_SENSOR_CFG, force_threshold=1.0),
     )
 
-    # ================= ペナルティ: 崩れるとマイナス (最小 -12.0) =================
+    # ================= ペナルティ: 崩れるとマイナス (最小 -19.5) =================
     # すべて値域 [-1, 0]。静止・対称・正面向きなら 0 なので「タダ取り」できない。
     drift_pen = RewTerm(
         func=mdp.drift_penalty, weight=1.5,
@@ -167,6 +171,14 @@ class PeriodicSquatRewardsCfg:
     hands_sym_pen = RewTerm(
         func=mdp.hands_symmetry_penalty, weight=1.0,
         params=dict(std=0.10, hand_cfg=HAND_BODY_CFG),
+    )
+    # しゃがみ切った時に肘が曲がっていたらマイナス (立ち位相では罰しない)
+    arm_ext_pen = RewTerm(
+        func=mdp.arm_extension_penalty, weight=3.0,
+        params=dict(
+            period=SQUAT_PERIOD, min_straightness=0.97, std=0.06,
+            shoulder_cfg=SHOULDER_CFG, elbow_cfg=ELBOW_CFG, hand_cfg=HAND_BODY_CFG,
+        ),
     )
     # 胴が左右に傾いたらマイナス (前傾ピッチは罰しない)
     torso_roll_pen = RewTerm(

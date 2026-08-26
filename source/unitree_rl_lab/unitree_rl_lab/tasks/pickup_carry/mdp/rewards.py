@@ -996,3 +996,65 @@ def hands_width_match(
     err = hand_w - target
     return torch.exp(-(err * err) / (std * std))
 
+# ---------------------------------------------------------------------------
+# v6: 腕の伸展 (しゃがみ切った時に肘が曲がっていたら罰する)
+# ---------------------------------------------------------------------------
+# 「腕が伸びている」を肘の関節角で判定すると、G1 の elbow のゼロ位置が
+# 「真っ直ぐ」なのかどうか USD を見ないと分からず危険。
+# そこで肩・肘・手の3点の幾何で測る:
+#
+#     straightness = ||肩 -> 手|| / (||肩 -> 肘|| + ||肘 -> 手||)
+#
+# 3点が一直線なら 1.0、曲がるほど小さくなる。肘の屈曲角を f とすると
+# 厳密に cos(f/2) に一致する (上腕と前腕の長さが違っても単調性は保たれる)。
+# リンク長も関節の符号規約も知らなくてよいのが利点。
+# ---------------------------------------------------------------------------
+
+
+def _sorted_by_lateral(rel_b: torch.Tensor) -> torch.Tensor:
+    """(N, 2, 3) を y 座標の昇順に並べ替える。
+
+    肩・肘・手を別々の正規表現で引くと find_bodies が返す左右の順序が
+    一致する保証がない。y でソートすれば必ず [右腕, 左腕] の順に揃うので、
+    3リンクを同じ腕どうしで対応付けられる。
+    """
+    idx = torch.argsort(rel_b[:, :, 1], dim=1)
+    return torch.gather(rel_b, 1, idx.unsqueeze(-1).expand(-1, -1, 3))
+
+
+def arm_extension_penalty(
+    env: "ManagerBasedRLEnv",
+    period: float = 6.0,
+    min_straightness: float = 0.97,
+    std: float = 0.06,
+    shoulder_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    elbow_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    hand_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """しゃがみが深いほど、腕が伸びていないことを強く罰する [-1, 0]。
+
+    深さでゲートしているので:
+      立ち位相 (depth=0) -> ペナルティ 0 (腕は自然に下ろしていてよい)
+      しゃがみ切り (depth=1) -> 伸展不足がそのままマイナス
+
+    min_straightness=0.97 は肘の屈曲 28 度までを許容する値。
+    それを超えた分だけ罰する片側ペナルティなので、伸ばしすぎは罰しない。
+
+    NOTE: 3つの SceneEntityCfg は必ず params で渡すこと。
+    """
+    depth = _squat_depth(env, period)
+
+    sh = _sorted_by_lateral(_bodies_in_yaw_frame(env, shoulder_cfg))   # (N, 2, 3)
+    el = _sorted_by_lateral(_bodies_in_yaw_frame(env, elbow_cfg))
+    hd = _sorted_by_lateral(_bodies_in_yaw_frame(env, hand_cfg))
+
+    upper = torch.linalg.norm(el - sh, dim=-1)      # 上腕 (N, 2)
+    fore = torch.linalg.norm(hd - el, dim=-1)       # 前腕 (N, 2)
+    direct = torch.linalg.norm(hd - sh, dim=-1)     # 肩から手までの直線距離
+
+    straightness = direct / (upper + fore + 1e-6)   # 1.0 で完全伸展
+    deficit = (min_straightness - straightness).clamp(min=0.0).mean(dim=-1)
+
+    shortfall = torch.exp(-(deficit * deficit) / (std * std)) - 1.0
+    return depth * shortfall
+
