@@ -90,9 +90,9 @@ Unitree G1の強化学習による開発
 
 <div align="center">
 
-| <div align="center"> Isaac Lab </div> | <div align="center">  Mujoco </div> |  <div align="center"> Physical </div> |
+| <div align="center"> Isaac Lab </div> | <div align="center">  Mujoco </div> |  
 |--- | --- | --- |
-| [<img src="Materials/screencast-from-2026-08-26-10-37-56_RVfoMS3u.gif" width="240px">](g1_sim.gif) | [<img src="https://oss-global-cdn.unitree.com/static/3c88e045ab124c3ab9c761a99cb5e71f_480x397.gif" width="240px">](g1_mujoco.gif) | [<img src="https://oss-global-cdn.unitree.com/static/6c17c6cf52ec4e26bbfab1fbf591adb2_480x270.gif" width="240px">](g1_real.gif) |
+| [<img src="Materials/screencast-from-2026-08-26-10-37-56_RVfoMS3u.gif" width="240px">](g1_sim.gif) | [<img src="Materials/Screencast from 2026年08月26日 16時25分50秒.gif" width="240px">](g1_mujoco.gif) | 
 
 </div>
 
