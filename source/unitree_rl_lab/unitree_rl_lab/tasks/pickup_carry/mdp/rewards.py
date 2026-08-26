@@ -908,3 +908,91 @@ def stance_width_penalty_phased(
     excess = (width - target).clamp(min=0.0)
     return torch.exp(-(excess * excess) / (std * std)) - 1.0
 
+# ---------------------------------------------------------------------------
+# v5: 手を「膝の前」に「膝幅」で出す
+# ---------------------------------------------------------------------------
+# hands_forward_tracking は骨盤基準の絶対位置しか見ておらず、y(左右)を
+# 一切拘束していなかった。hands_symmetry_penalty も「左右対称」しか
+# 要求しないので、両手が中央で重なっていても満点になってしまう。
+#
+# ここでは基準を骨盤から「膝リンク」に変える:
+#   - 膝はしゃがみと一緒に前下方へ動くので、オフセットが位相によらず安定する
+#   - 「膝幅」「膝の前」という指示をそのまま数式にできる
+#
+# すべて左右の平均・間隔で評価するので find_bodies が返す左右の並び順に
+# 依存しない (hands と knees で順序が違っても正しく動く)。
+# ---------------------------------------------------------------------------
+
+
+def _bodies_in_yaw_frame(
+    env: "ManagerBasedRLEnv",
+    body_cfg: SceneEntityCfg,
+) -> torch.Tensor:
+    """骨盤原点・ヨーのみ揃えた座標系での body 位置 (N, K, 3)。"""
+    robot: Articulation = env.scene[body_cfg.name]
+    pos_w = robot.data.body_pos_w[:, body_cfg.body_ids, :]
+    rel_w = pos_w - robot.data.root_pos_w.unsqueeze(1)
+
+    k = rel_w.shape[1]
+    q = yaw_quat(robot.data.root_quat_w).unsqueeze(1).expand(-1, k, -1)
+    rel_b = quat_apply_inverse(q.reshape(-1, 4), rel_w.reshape(-1, 3))
+    return rel_b.reshape(rel_w.shape)
+
+
+def hands_at_knee_front(
+    env: "ManagerBasedRLEnv",
+    period: float = 6.0,
+    stand_forward: float = 0.03,
+    squat_forward: float = 0.15,
+    stand_up: float = 0.20,
+    squat_up: float = -0.10,
+    std: float = 0.12,
+    hand_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    knee_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """両手の中心が「膝の中心 + オフセット」に来ているほど良い [0, 1]。
+
+    しゃがむにつれて手が膝より前・膝より下へ移動する。
+    骨盤基準ではなく膝基準なので、深さが変わってもオフセットの意味が変わらない。
+
+    NOTE: hand_cfg / knee_cfg はそれぞれ body_names を持つ SceneEntityCfg を
+          params で渡すこと。
+    """
+    depth = _squat_depth(env, period)
+    hands = _bodies_in_yaw_frame(env, hand_cfg)      # (N, 2, 3)
+    knees = _bodies_in_yaw_frame(env, knee_cfg)      # (N, 2, 3)
+
+    t_fwd = stand_forward + (squat_forward - stand_forward) * depth
+    t_up = stand_up + (squat_up - stand_up) * depth
+
+    err_fwd = hands[:, :, 0].mean(dim=-1) - (knees[:, :, 0].mean(dim=-1) + t_fwd)
+    err_up = hands[:, :, 2].mean(dim=-1) - (knees[:, :, 2].mean(dim=-1) + t_up)
+
+    return torch.exp(-(err_fwd ** 2 + err_up ** 2) / (std * std))
+
+
+def hands_width_match(
+    env: "ManagerBasedRLEnv",
+    width_scale: float = 1.0,
+    min_width: float = 0.16,
+    std: float = 0.06,
+    hand_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    knee_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """両手の左右間隔が膝の間隔に一致しているほど良い [0, 1]。
+
+    これが無いと「両手を中央で揃える」解が対称性報酬を満点にしてしまう。
+    膝が閉じている立ち位相でも最低 min_width は開くよう下限を設ける。
+
+    左右の差の絶対値だけを使うので body_ids の並び順に依存しない。
+    """
+    hands = _bodies_in_yaw_frame(env, hand_cfg)
+    knees = _bodies_in_yaw_frame(env, knee_cfg)
+
+    hand_w = torch.abs(hands[:, 0, 1] - hands[:, 1, 1])
+    knee_w = torch.abs(knees[:, 0, 1] - knees[:, 1, 1])
+    target = (knee_w * width_scale).clamp(min=min_width)
+
+    err = hand_w - target
+    return torch.exp(-(err * err) / (std * std))
+

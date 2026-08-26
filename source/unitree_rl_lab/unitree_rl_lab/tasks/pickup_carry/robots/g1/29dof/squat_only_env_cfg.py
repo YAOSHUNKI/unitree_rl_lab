@@ -60,8 +60,12 @@ STAND_HEIGHT, SQUAT_HEIGHT = 0.73, 0.33
 # === 手の参照位置 (骨盤原点・ヨー座標系) ====================================
 # x = 前方 / z = 上下。関節角ではなく位置で指定するので符号規約に依存しない。
 # NOTE: STAND_* は G1 の腕の自然位置の推定値。PLAY で実測して合わせると精度が上がる。
-STAND_HAND_X, SQUAT_HAND_X = 0.05, 0.35   # しゃがむと手が前に出る
-STAND_HAND_Z, SQUAT_HAND_Z = -0.15, -0.20  # 同時に下がる (骨盤0.33m時 -> 地上0.13m)
+# 基準は骨盤ではなく「膝リンク」。しゃがみと一緒に膝が前下方へ動くので、
+# 深さが変わってもオフセットの意味が変わらない。
+STAND_HAND_FWD, SQUAT_HAND_FWD = 0.03, 0.15   # 膝より何m前に手を出すか
+STAND_HAND_UP,  SQUAT_HAND_UP  = 0.20, -0.10  # 膝より何m上に手を置くか
+HAND_WIDTH_SCALE = 1.0                        # 手の間隔 = 膝の間隔 x これ
+HAND_WIDTH_MIN   = 0.16                       # 立ち位相でも最低これだけ開く [m]
 
 # === 開脚の許容量 ===========================================================
 # 完全に 0 は非現実的 (大腿が水平近くまで来ると胴の入るスペースが要る)。
@@ -82,6 +86,7 @@ LATERAL_CFG   = SceneEntityCfg("robot", joint_names=[
 HIP_ROLL_CFG  = SceneEntityCfg("robot", joint_names=[".*_hip_roll_joint"])
 FEET_BODY_CFG   = SceneEntityCfg("robot", body_names=[FOOT_BODY_REGEX])
 HAND_BODY_CFG   = SceneEntityCfg("robot", body_names=[HAND_BODY_REGEX])
+KNEE_BODY_CFG   = SceneEntityCfg("robot", body_names=[".*_knee_link"])
 FOOT_SENSOR_CFG = SceneEntityCfg("foot_contact", body_names=[FOOT_BODY_REGEX])
 
 _POSE_PARAMS = dict(
@@ -98,7 +103,7 @@ _POSE_PARAMS = dict(
 
 @configclass
 class PeriodicSquatRewardsCfg:
-    # ================= 正報酬: タスク達成 (最大 18.0) =================
+    # ================= 正報酬: タスク達成 (最大 21.0) =================
     # 姿勢追従は 2段構え。
     #   coarse(std 0.85): 目標から遠くても勾配が残る -> 学習初期の誘導
     #   fine  (std 0.35): 精度を出さないと入らない   -> 収束後の精度
@@ -118,14 +123,23 @@ class PeriodicSquatRewardsCfg:
             robot_cfg=SceneEntityCfg("robot"),
         ),
     )
-    # しゃがむにつれて両手を前へ
-    hands_forward = RewTerm(
-        func=mdp.hands_forward_tracking, weight=3.0,
+    # しゃがむにつれて両手を「膝の前」へ
+    hands_knee_front = RewTerm(
+        func=mdp.hands_at_knee_front, weight=3.0,
         params=dict(
-            period=SQUAT_PERIOD, std=0.13,
-            stand_x=STAND_HAND_X, squat_x=SQUAT_HAND_X,
-            stand_z=STAND_HAND_Z, squat_z=SQUAT_HAND_Z,
-            hand_cfg=HAND_BODY_CFG,
+            period=SQUAT_PERIOD, std=0.12,
+            stand_forward=STAND_HAND_FWD, squat_forward=SQUAT_HAND_FWD,
+            stand_up=STAND_HAND_UP,       squat_up=SQUAT_HAND_UP,
+            hand_cfg=HAND_BODY_CFG, knee_cfg=KNEE_BODY_CFG,
+        ),
+    )
+    # 両手の間隔を「膝幅」に合わせる
+    # (これが無いと hands_sym_pen だけでは両手が中央で重なっても満点になる)
+    hands_width = RewTerm(
+        func=mdp.hands_width_match, weight=2.0,
+        params=dict(
+            width_scale=HAND_WIDTH_SCALE, min_width=HAND_WIDTH_MIN, std=0.06,
+            hand_cfg=HAND_BODY_CFG, knee_cfg=KNEE_BODY_CFG,
         ),
     )
     # 合計を正に保つ床 (転倒判定は終了条件が担当するので小さく)
@@ -149,7 +163,7 @@ class PeriodicSquatRewardsCfg:
         params=dict(std=0.15, force_threshold=1.0,
                     sensor_cfg=FOOT_SENSOR_CFG, asset_cfg=FEET_BODY_CFG),
     )
-    # 手が左右非対称だとマイナス
+    # 手が左右非対称だとマイナス (中心が揃っているか。間隔は hands_width が担当)
     hands_sym_pen = RewTerm(
         func=mdp.hands_symmetry_penalty, weight=1.0,
         params=dict(std=0.10, hand_cfg=HAND_BODY_CFG),
@@ -247,7 +261,8 @@ class G1PeriodicSquatEnvCfg(G1PickupCarryEnvCfg):
         print(f">>> PeriodicSquat v3: period={SQUAT_PERIOD}s")
         print(f"    knee   {STAND_KNEE} -> {SQUAT_KNEE} rad")
         print(f"    height {STAND_HEIGHT} -> {SQUAT_HEIGHT} m")
-        print(f"    hand x {STAND_HAND_X} -> {SQUAT_HAND_X} m (骨盤基準・前方)")
+        print(f"    hand   膝より {STAND_HAND_FWD} -> {SQUAT_HAND_FWD} m 前 / "
+              f"{STAND_HAND_UP} -> {SQUAT_HAND_UP} m 上, 間隔=膝幅")
 
 
 @configclass
