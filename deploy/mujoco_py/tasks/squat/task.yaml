@@ -1,0 +1,6 @@
+# tasks/squat/task.yaml  — optional per-task viewer settings (all fields optional)
+# scene is auto-selected (box is present in the observation -> scene_box.xml).
+base_height: 0.80
+# period: 6.0        # normally taken from deploy.yaml squat_phase param
+# box_x: 0.7
+# box_y: 0.0

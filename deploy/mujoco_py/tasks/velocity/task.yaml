@@ -1,0 +1,7 @@
+# tasks/velocity/task.yaml — optional per-task viewer settings
+# no box in observation -> scene_29dof.xml is auto-selected.
+base_height: 0.80
+vx: 0.5            # walk forward 0.5 m/s (override on CLI with --vx/--vy/--wz)
+vy: 0.0
+wz: 0.0
+history_order: oldest_first   # velocity policy stacks 5 frames; flip to newest_first if it looks wrong
