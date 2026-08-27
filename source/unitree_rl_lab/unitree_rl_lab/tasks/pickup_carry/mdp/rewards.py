@@ -929,3 +929,30 @@ def hands_knee_clearance_penalty(
     deficit = (min_distance - nearest).clamp(min=0.0).mean(dim=-1)
     return torch.exp(-(deficit * deficit) / (std * std)) - 1.0
 
+def waist_pitch_penalty(
+    env: "ManagerBasedRLEnv",
+    max_abs: float = 0.10,
+    std: float = 0.12,
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """胴の反り / 過屈曲を罰する [-1, 0]。
+
+    upright_bonus / torso_roll_penalty / torso_pitch_tracking はいずれも
+    projected_gravity_b を読んでおり、これは骨盤(root)基準。
+    腰から上を反らせても骨盤が垂直なら検出できない。
+
+    腕を前に出すと重心が前へ移動するので、その対価として上体を後ろへ
+    反らせてバランスを取る解が生まれる。waist_pitch は前傾を hip_pitch に
+    任せているぶん無拘束になっていたため、この抜け道が無料だった。
+
+    max_abs までは無罰の両側ペナルティ。前傾は hip_pitch が担当するので
+    waist_pitch は中立付近に保つのが正しい (運動学モデルでも胴は
+    股関節から一本の剛体として扱っている)。
+
+    NOTE: robot_cfg は waist_pitch_joint を含む SceneEntityCfg を params で渡すこと。
+    """
+    robot: Articulation = env.scene[robot_cfg.name]
+    q = robot.data.joint_pos[:, robot_cfg.joint_ids]
+    excess = (q.abs() - max_abs).clamp(min=0.0).mean(dim=-1)
+    return torch.exp(-(excess * excess) / (std * std)) - 1.0
+

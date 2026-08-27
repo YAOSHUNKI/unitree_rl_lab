@@ -92,7 +92,8 @@ HIP_PITCH_CFG = SceneEntityCfg("robot", joint_names=[".*_hip_pitch_joint"])
 KNEE_CFG      = SceneEntityCfg("robot", joint_names=[".*_knee_joint"])
 ANKLE_CFG     = SceneEntityCfg("robot", joint_names=[".*_ankle_pitch_joint"])
 # 0 に固定したい関節: 脚のねじれ(hip_yaw)・胴のねじれと横傾き(waist)
-# waist_pitch は前傾に使うので入れない。
+# waist_pitch は専用項 waist_pitch_pen が担当するのでここには入れない
+# (グループ平均に混ぜるとシグナルが薄まるため)。
 # hip_roll(開脚) はここに入れると平均で薄まるので専用項 HIP_ROLL_CFG に分離した。
 LATERAL_CFG   = SceneEntityCfg("robot", joint_names=[
     ".*_hip_yaw_joint", "waist_yaw_joint", "waist_roll_joint",
@@ -103,6 +104,7 @@ HAND_BODY_CFG   = SceneEntityCfg("robot", body_names=[HAND_BODY_REGEX])
 KNEE_BODY_CFG   = SceneEntityCfg("robot", body_names=[".*_knee_link"])
 SHOULDER_CFG    = SceneEntityCfg("robot", body_names=[".*_shoulder_yaw_link"])
 ELBOW_CFG       = SceneEntityCfg("robot", body_names=[".*_elbow_link"])
+WAIST_PITCH_CFG = SceneEntityCfg("robot", joint_names=["waist_pitch_joint"])
 FOOT_SENSOR_CFG = SceneEntityCfg("foot_contact", body_names=[FOOT_BODY_REGEX])
 
 _POSE_PARAMS = dict(
@@ -216,6 +218,11 @@ class PeriodicSquatRewardsCfg:
             min_distance=0.18, std=0.08,
             hand_cfg=HAND_BODY_CFG, knee_cfg=KNEE_BODY_CFG,
         ),
+    )
+    # 胴を反らせたらマイナス (骨盤基準の projected_gravity では検出できない)
+    waist_pitch_pen = RewTerm(
+        func=mdp.waist_pitch_penalty, weight=4.0,
+        params=dict(max_abs=0.10, std=0.12, robot_cfg=WAIST_PITCH_CFG),
     )
     # 胴が左右に傾いたらマイナス (前傾ピッチは罰しない)
     torso_roll_pen = RewTerm(
