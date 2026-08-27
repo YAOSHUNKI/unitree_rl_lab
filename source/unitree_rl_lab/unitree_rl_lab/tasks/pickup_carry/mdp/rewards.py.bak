@@ -121,6 +121,18 @@ def squat_when_near_box(env, target_height=0.50, near_threshold=0.75, std=0.10,
     return near * torch.exp(-(err * err) / (std * std))
 
 
+def hold_still_when_squatting(env, near_threshold=0.75,
+                              object_cfg=SceneEntityCfg("box"),
+                              robot_cfg=SceneEntityCfg("robot")):
+    robot: Articulation = env.scene[robot_cfg.name]
+    dx, dy = _box_relative_xy(env, object_cfg, robot_cfg)
+    dist = torch.sqrt(dx * dx + dy * dy + 1e-8)
+    near = (dist < near_threshold).float()
+    lin_speed = torch.linalg.norm(robot.data.root_lin_vel_b[:, :2], dim=-1)
+    ang_speed = torch.abs(robot.data.root_ang_vel_b[:, 2])
+    return -near * (lin_speed + 0.5 * ang_speed)
+
+
 def hands_near_box(env, std=0.15,
                    hand_body_names=("left_wrist_yaw_link", "right_wrist_yaw_link"),
                    near_threshold=0.75,
@@ -209,14 +221,129 @@ def box_collision_penalty(env, min_distance=0.30,
 
 
 # ===========================================================================
-# 箱タスク (pickup_carry_env_cfg) 専用の姿勢項
+# Knee-primary squat rewards (これが今回のメイン)
 # ---------------------------------------------------------------------------
-# 以下は箱の pick & carry タスクからのみ参照される。周期スクワット
-# (squat_only_env_cfg) は下の「参照姿勢トラッキング」系を使う。
+# 設計方針:
+#   - 「膝が曲がること」を最優先の主報酬にする
+#   - 「胴体が低いこと」の報酬は膝が曲がっている時だけ与える
+#     → 開脚で下げても報酬ゼロ、膝で下げると報酬2倍(高さ×膝)
+#   - 開脚は 3 種類のペナルティで多角的に叩く(hip_roll角、絶対値、足間距離)
+#   - 立ち止まりは周期目標で強制的に損させる
 # ===========================================================================
 
 
-# ---------- 箱タスク用の開脚抑制 ----------
+def knee_bent_reward(
+    env: "ManagerBasedRLEnv",
+    robot_cfg: SceneEntityCfg = SceneEntityCfg(
+        "robot", joint_names=["left_knee_joint", "right_knee_joint"]
+    ),
+    max_angle: float = 1.5,
+) -> torch.Tensor:
+    """膝が曲がっているほど良い(常時ON、リニア、target無し)。
+
+    しゃがみ学習の最主要報酬。target がないので勾配が消えず、初期方策から
+    徐々に膝屈曲を発見させられる。
+    """
+    robot: Articulation = env.scene[robot_cfg.name]
+    q = robot.data.joint_pos[:, robot_cfg.joint_ids]
+    return q.clamp(0.0, max_angle).mean(dim=-1)
+
+
+def hip_pitch_bent_reward(
+    env: "ManagerBasedRLEnv",
+    robot_cfg: SceneEntityCfg = SceneEntityCfg(
+        "robot", joint_names=["left_hip_pitch_joint", "right_hip_pitch_joint"]
+    ),
+    max_abs_angle: float = 1.2,
+) -> torch.Tensor:
+    """股関節pitchが曲がっているほど良い。膝と協調して初めて胴体が下がる。"""
+    robot: Articulation = env.scene[robot_cfg.name]
+    q = robot.data.joint_pos[:, robot_cfg.joint_ids]
+    return q.abs().clamp(0.0, max_abs_angle).mean(dim=-1)
+
+
+def height_low_gated_by_knee(
+    env: "ManagerBasedRLEnv",
+    max_height: float = 0.78,
+    min_height: float = 0.40,
+    knee_gate_min: float = 0.5,
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    knee_cfg: SceneEntityCfg = SceneEntityCfg(
+        "robot", joint_names=["left_knee_joint", "right_knee_joint"]
+    ),
+) -> torch.Tensor:
+    """胴体が低いほど良い。ただし膝が曲がっていない場合は報酬ゼロ。
+
+    開脚で下げても膝が伸びたままなら knee_ok≈0 で報酬が消えるので、
+    「胴体を下げる = 膝を曲げる」以外の解が事実上塞がれる。
+    """
+    robot: Articulation = env.scene[robot_cfg.name]
+    h = robot.data.root_pos_w[:, 2]
+    height_score = ((max_height - h) / (max_height - min_height)).clamp(0.0, 1.0)
+
+    knee = robot.data.joint_pos[:, knee_cfg.joint_ids].mean(dim=-1)
+    knee_ok = torch.sigmoid(10.0 * (knee - knee_gate_min))  # 0.5rad未満で0、以上で1
+
+    return height_score * knee_ok
+
+
+# ---------- 周期スクワット目標 ----------
+
+
+def periodic_height_target(
+    env: "ManagerBasedRLEnv",
+    period: float = 3.0,
+    stand_height: float = 0.75,
+    squat_height: float = 0.50,
+    std: float = 0.08,
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """胴体高さが sin 波の目標に追従するほど高報酬(ガウシアン)。"""
+    robot: Articulation = env.scene[robot_cfg.name]
+    phi = _squat_phase(env, period)
+    mid = 0.5 * (stand_height + squat_height)
+    amp = 0.5 * (stand_height - squat_height)
+    target = mid + amp * torch.cos(2 * math.pi * phi)
+    h = robot.data.root_pos_w[:, 2]
+    err = h - target
+    return torch.exp(-(err * err) / (std * std))
+
+
+def periodic_knee_target(
+    env: "ManagerBasedRLEnv",
+    period: float = 3.0,
+    stand_knee: float = 0.1,
+    squat_knee: float = 1.3,
+    robot_cfg: SceneEntityCfg = SceneEntityCfg(
+        "robot", joint_names=["left_knee_joint", "right_knee_joint"]
+    ),
+) -> torch.Tensor:
+    """膝角度が周期目標に近いほど良い(リニア、常時ON)。"""
+    robot: Articulation = env.scene[robot_cfg.name]
+    depth = _squat_depth(env, period)  # 0..1
+    target = stand_knee + (squat_knee - stand_knee) * depth
+    q = robot.data.joint_pos[:, robot_cfg.joint_ids].mean(dim=-1)
+    return -torch.abs(q - target)
+
+
+def periodic_hip_pitch_target(
+    env: "ManagerBasedRLEnv",
+    period: float = 3.0,
+    stand_hip: float = 0.0,
+    squat_hip: float = -0.7,
+    robot_cfg: SceneEntityCfg = SceneEntityCfg(
+        "robot", joint_names=["left_hip_pitch_joint", "right_hip_pitch_joint"]
+    ),
+) -> torch.Tensor:
+    """股関節pitchが周期目標に近いほど良い(膝と協調して胴体を下げる)。"""
+    robot: Articulation = env.scene[robot_cfg.name]
+    depth = _squat_depth(env, period)
+    target = stand_hip + (squat_hip - stand_hip) * depth
+    q = robot.data.joint_pos[:, robot_cfg.joint_ids].mean(dim=-1)
+    return -torch.abs(q - target)
+
+
+# ---------- 開脚抑制(多角的に叩く) ----------
 
 
 def hip_abduction_penalty(
@@ -229,6 +356,18 @@ def hip_abduction_penalty(
     robot: Articulation = env.scene[robot_cfg.name]
     q = robot.data.joint_pos[:, robot_cfg.joint_ids]
     return -(q ** 2).sum(dim=-1)
+
+
+def hip_roll_magnitude_penalty(
+    env: "ManagerBasedRLEnv",
+    robot_cfg: SceneEntityCfg = SceneEntityCfg(
+        "robot", joint_names=["left_hip_roll_joint", "right_hip_roll_joint"]
+    ),
+) -> torch.Tensor:
+    """hip_roll の絶対値和ペナルティ。小さな外転も見逃さない。"""
+    robot: Articulation = env.scene[robot_cfg.name]
+    q = robot.data.joint_pos[:, robot_cfg.joint_ids]
+    return -q.abs().sum(dim=-1)
 
 
 def feet_lateral_distance_penalty(
@@ -271,6 +410,36 @@ def leg_symmetry_penalty(
     return -(d_roll ** 2 + d_pitch ** 2 + d_knee ** 2)
 
 
+# ---------- 足浮き抑制(緩め) ----------
+
+
+def feet_air_time_penalty(
+    env: "ManagerBasedRLEnv",
+    sensor_cfg: SceneEntityCfg = SceneEntityCfg(
+        "foot_contact", body_names=[".*_ankle_roll_link"]
+    ),
+    grace_period: float = 0.2,
+) -> torch.Tensor:
+    """空中滞在時間が grace_period を超えた分だけリニアにペナルティ。"""
+    cs: ContactSensor = env.scene.sensors[sensor_cfg.name]
+    air = cs.data.current_air_time[:, sensor_cfg.body_ids]
+    excess = (air - grace_period).clamp(min=0.0).sum(dim=-1)
+    return -excess
+
+
+# ---------- 立ち止まり抑制 ----------
+
+
+def freeze_penalty(
+    env: "ManagerBasedRLEnv",
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    vz_threshold: float = 0.05,
+) -> torch.Tensor:
+    """胴体の上下速度がほぼゼロの間ペナルティ(周期スクワット中の停止を防ぐ)。"""
+    robot: Articulation = env.scene[robot_cfg.name]
+    vz = torch.abs(robot.data.root_lin_vel_w[:, 2])
+    return -(vz < vz_threshold).float()
+
 def knee_flexion_when_squatting(
     env: "ManagerBasedRLEnv",
     target_knee_angle: float = 1.2,
@@ -295,7 +464,7 @@ def knee_flexion_when_squatting(
     err = q.mean(dim=-1) - target_knee_angle
     return near * torch.exp(-(err * err) / (std * std))
 
-# ---------- 立位判定 ----------
+# ---------- 転倒(寝転がり)ペナルティ ----------
 
 
 def upright_bonus(
@@ -313,8 +482,28 @@ def upright_bonus(
     return (1.0 - g_z) * 0.5
 
 
+def fallen_penalty(
+    env: "ManagerBasedRLEnv",
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    tilt_threshold: float = -0.3,   # g_z がこれより大きい(=より水平)ならペナルティ
+    height_threshold: float = 0.30,  # pelvis がこれより低いとペナルティ
+) -> torch.Tensor:
+    """明らかに寝転がっているとき大きな負の報酬。
+
+    - tilt_threshold=-0.3: g_z が -0.3 より大きい(=約72°以上傾いている)
+    - height_threshold=0.30: pelvis が 30cm 以下(=寝てる/座り込み)
+    どちらかを満たせばペナルティ。
+    """
+    robot: RigidObject = env.scene[robot_cfg.name]
+    g_z = robot.data.projected_gravity_b[:, 2]
+    h = robot.data.root_pos_w[:, 2]
+
+    too_tilted = (g_z > tilt_threshold).float()
+    too_low = (h < height_threshold).float()
+    return -(too_tilted + too_low)   # 両方満たせば -2、片方で -1
+
 # ===========================================================================
-# 周期スクワット: 参照姿勢トラッキング (現行の主報酬)
+# v2: 参照姿勢トラッキング型スクワット報酬
 # ---------------------------------------------------------------------------
 # 設計原則:
 #   1. すべての項を [0, 1] の正値に。→ 生存が常に得 = 自殺(寝転がり)しない
@@ -399,6 +588,25 @@ def feet_grounded(
     forces = torch.linalg.norm(cs.data.net_forces_w[:, sensor_cfg.body_ids, :], dim=-1)
     return (forces > force_threshold).float().mean(dim=-1)
 
+
+def feet_stance_width(
+    env: "ManagerBasedRLEnv",
+    target_width: float = 0.20,
+    std: float = 0.12,
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """足の左右間隔が target_width に近いほど良い [0, 1]。
+
+    ペナルティではなく正報酬にすることで、報酬の総和が常に正に保たれる。
+    NOTE: robot_cfg は body_names を指定して params で渡すこと。
+    """
+    robot: Articulation = env.scene[robot_cfg.name]
+    feet_w = robot.data.body_pos_w[:, robot_cfg.body_ids, :]   # (N, 2, 3)
+    rel = feet_w[:, 0, :] - feet_w[:, 1, :]
+    rel_b = quat_apply_inverse(yaw_quat(robot.data.root_quat_w), rel)
+    width = torch.abs(rel_b[:, 1])
+    err = width - target_width
+    return torch.exp(-(err * err) / (std * std))
 
 # ---------------------------------------------------------------------------
 # その場に留まる (定位置保持) 報酬 -- すべて [0, 1] の正値
@@ -532,8 +740,19 @@ def feet_slip_penalty(
     ) - 1.0
 
 
+def stance_width_penalty(
+    env: "ManagerBasedRLEnv",
+    target_width: float = 0.20,
+    std: float = 0.12,
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """足幅が target_width からずれた分だけマイナス [-1, 0]。"""
+    return feet_stance_width(
+        env, target_width=target_width, std=std, robot_cfg=robot_cfg
+    ) - 1.0
+
 # ---------------------------------------------------------------------------
-# 手を前に出す / 左右対称 / 胴を正面に向ける
+# v3: 手を前に出す / 左右対称 / 胴を正面に向ける
 # ---------------------------------------------------------------------------
 
 
@@ -554,6 +773,34 @@ def _hands_in_yaw_frame(
     q = yaw_quat(robot.data.root_quat_w).unsqueeze(1).expand(-1, n_hand, -1)
     rel_b = quat_apply_inverse(q.reshape(-1, 4), rel_w.reshape(-1, 3))
     return rel_b.reshape(rel_w.shape)
+
+
+def hands_forward_tracking(
+    env: "ManagerBasedRLEnv",
+    period: float = 6.0,
+    stand_x: float = 0.05,
+    squat_x: float = 0.30,
+    stand_z: float = -0.15,
+    squat_z: float = -0.10,
+    std: float = 0.25,
+    hand_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """しゃがむにつれて両手が前方へ出るほど良い [0, 1]。
+
+    骨盤から見た手の (前後 x, 上下 z) を位相に応じた目標に追従させる。
+    左右どちらの手も同じ目標なので、この項自体が対称性も促す。
+
+    NOTE: stand_x / stand_z は G1 の腕の自然位置の推定値。
+          PLAY で実測して合わせると精度が上がる。
+    """
+    depth = _squat_depth(env, period)
+    rel_b = _hands_in_yaw_frame(env, hand_cfg)                        # (N, 2, 3)
+
+    tx = (stand_x + (squat_x - stand_x) * depth).unsqueeze(-1)        # (N, 1)
+    tz = (stand_z + (squat_z - stand_z) * depth).unsqueeze(-1)
+
+    err = (rel_b[:, :, 0] - tx) ** 2 + (rel_b[:, :, 2] - tz) ** 2     # (N, 2)
+    return torch.exp(-err.mean(dim=-1) / (std * std))
 
 
 def hands_symmetry_penalty(
@@ -593,7 +840,7 @@ def torso_roll_penalty(
     return torch.exp(-(g_y * g_y) / (std * std)) - 1.0
 
 # ---------------------------------------------------------------------------
-# 開脚の専用抑制 (pose_track の lateral 項では弱すぎたため独立させる)
+# v4: 開脚の専用抑制 (pose_track の lateral 項では弱すぎたため独立させる)
 # ---------------------------------------------------------------------------
 # 深いスクワットは narrow stance だと踏ん張れないので、開脚が「安い抜け道」
 # になる。pose_track の lateral 項はグループ内平均なので他の関節に薄められ、
@@ -662,7 +909,7 @@ def stance_width_penalty_phased(
     return torch.exp(-(excess * excess) / (std * std)) - 1.0
 
 # ---------------------------------------------------------------------------
-# 手を「膝の前」に「膝幅」で出す
+# v5: 手を「膝の前」に「膝幅」で出す
 # ---------------------------------------------------------------------------
 # hands_forward_tracking は骨盤基準の絶対位置しか見ておらず、y(左右)を
 # 一切拘束していなかった。hands_symmetry_penalty も「左右対称」しか
@@ -692,6 +939,38 @@ def _bodies_in_yaw_frame(
     return rel_b.reshape(rel_w.shape)
 
 
+def hands_at_knee_front(
+    env: "ManagerBasedRLEnv",
+    period: float = 6.0,
+    stand_forward: float = 0.03,
+    squat_forward: float = 0.15,
+    stand_up: float = 0.20,
+    squat_up: float = -0.10,
+    std: float = 0.12,
+    hand_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    knee_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """両手の中心が「膝の中心 + オフセット」に来ているほど良い [0, 1]。
+
+    しゃがむにつれて手が膝より前・膝より下へ移動する。
+    骨盤基準ではなく膝基準なので、深さが変わってもオフセットの意味が変わらない。
+
+    NOTE: hand_cfg / knee_cfg はそれぞれ body_names を持つ SceneEntityCfg を
+          params で渡すこと。
+    """
+    depth = _squat_depth(env, period)
+    hands = _bodies_in_yaw_frame(env, hand_cfg)      # (N, 2, 3)
+    knees = _bodies_in_yaw_frame(env, knee_cfg)      # (N, 2, 3)
+
+    t_fwd = stand_forward + (squat_forward - stand_forward) * depth
+    t_up = stand_up + (squat_up - stand_up) * depth
+
+    err_fwd = hands[:, :, 0].mean(dim=-1) - (knees[:, :, 0].mean(dim=-1) + t_fwd)
+    err_up = hands[:, :, 2].mean(dim=-1) - (knees[:, :, 2].mean(dim=-1) + t_up)
+
+    return torch.exp(-(err_fwd ** 2 + err_up ** 2) / (std * std))
+
+
 def hands_width_match(
     env: "ManagerBasedRLEnv",
     width_scale: float = 1.0,
@@ -718,7 +997,7 @@ def hands_width_match(
     return torch.exp(-(err * err) / (std * std))
 
 # ---------------------------------------------------------------------------
-# 腕の伸展 (しゃがみ切った時に肘が曲がっていたら罰する)
+# v6: 腕の伸展 (しゃがみ切った時に肘が曲がっていたら罰する)
 # ---------------------------------------------------------------------------
 # 「腕が伸びている」を肘の関節角で判定すると、G1 の elbow のゼロ位置が
 # 「真っ直ぐ」なのかどうか USD を見ないと分からず危険。
@@ -780,7 +1059,7 @@ def arm_extension_penalty(
     return depth * shortfall
 
 # ---------------------------------------------------------------------------
-# 腕を「前方へ振る」 (肩関節を動かす動機を直接与える)
+# v7: 腕を「前方へ振る」 (肩関節を動かす動機を直接与える)
 # ---------------------------------------------------------------------------
 # hands_at_knee_front は手の「到達点」を目標にしていたが、
 #   - 目標が腕の長さの外にあると勾配が薄くなる
@@ -858,74 +1137,4 @@ def torso_pitch_tracking(
                        + (squat_pitch - stand_pitch) * depth)
     err = robot.data.projected_gravity_b[:, 0] - target
     return torch.exp(-(err * err) / (std * std))
-
-# ---------------------------------------------------------------------------
-# しゃがみ切りでの腕の姿勢を強制する (大幅減点)
-# ---------------------------------------------------------------------------
-# arm_forward_direction は正報酬なので「取れなくても損はしない」。
-# 腕を前に出すのはバランスを崩すリスクがあるため、正報酬だけだと
-# リスクを避けて腕を下ろしたままにする解が残る。
-# しゃがみ切りでの腕の姿勢は必須要件なので、達成しない場合に明確な
-# コストを課すペナルティとして重ねる。
-#
-# どちらも depth ゲート付き・片側・値域 [-1, 0]。
-# 立ち位相では 0 なので、腕を下ろした自然な立ち姿勢は罰しない。
-# ---------------------------------------------------------------------------
-
-
-def arm_forward_shortfall_penalty(
-    env: "ManagerBasedRLEnv",
-    period: float = 6.0,
-    min_forward: float = 0.85,
-    std: float = 0.15,
-    shoulder_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
-    elbow_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
-) -> torch.Tensor:
-    """しゃがみ切りで上腕が min_forward まで前に出ていない分を罰する [-1, 0]。
-
-    min_forward=0.85 は「しゃがみ切りで鉛直から 58 度前」の意味。閾値は
-    深さに比例するので、沈み込み途中で正しく追従していれば減点は 0。
-    下回った分だけマイナスで上回る分は罰しない (片側)。立ち位相は 0。
-
-    上腕(肩->肘)で測るので、肘を曲げて手先だけ前に出す解では回避できない。
-    """
-    depth = _squat_depth(env, period)
-
-    sh = _sorted_by_lateral(_bodies_in_yaw_frame(env, shoulder_cfg))
-    el = _sorted_by_lateral(_bodies_in_yaw_frame(env, elbow_cfg))
-
-    v = el - sh
-    fwd = v[:, :, 0] / (torch.linalg.norm(v, dim=-1) + 1e-6)          # (N, 2)
-
-    # 閾値も深さに比例させる。定数のままだと沈み込み途中で腕が正しく
-    # 追従していても「足りない」と判定され、目標達成時でも減点が残る。
-    threshold = min_forward * depth
-    deficit = (threshold.unsqueeze(-1) - fwd).clamp(min=0.0).mean(dim=-1)
-    return depth * (torch.exp(-(deficit * deficit) / (std * std)) - 1.0)
-
-
-def hands_knee_clearance_penalty(
-    env: "ManagerBasedRLEnv",
-    min_distance: float = 0.18,
-    std: float = 0.08,
-    hand_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
-    knee_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
-) -> torch.Tensor:
-    """手が膝に近すぎる分だけ罰する [-1, 0]。
-
-    深いスクワットでは膝が前方かつ胸の高さ付近まで上がってくるため、
-    腕を下ろしたままだと手が膝に干渉する。腕を前方・胸の高さに出す解へ
-    誘導すると同時に、めり込んだ姿勢を明示的に潰す。
-
-    各手について両膝との距離の最小値を取るので、body_ids の左右の
-    並び順に依存しない。
-    """
-    hands = _bodies_in_yaw_frame(env, hand_cfg)                       # (N, 2, 3)
-    knees = _bodies_in_yaw_frame(env, knee_cfg)                       # (N, 2, 3)
-
-    d = torch.linalg.norm(hands.unsqueeze(2) - knees.unsqueeze(1), dim=-1)  # (N,2,2)
-    nearest = d.min(dim=-1).values                                    # 各手 -> 最寄りの膝
-
-    deficit = (min_distance - nearest).clamp(min=0.0).mean(dim=-1)
-    return torch.exp(-(deficit * deficit) / (std * std)) - 1.0
 

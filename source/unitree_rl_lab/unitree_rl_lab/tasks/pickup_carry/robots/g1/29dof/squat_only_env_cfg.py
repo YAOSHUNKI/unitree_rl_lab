@@ -66,8 +66,11 @@ STAND_HEIGHT, SQUAT_HEIGHT = 0.73, 0.39
 # 手の「絶対位置」を別途指定すると腕長の推定値に依存し、腕を前に振ると
 # 手が必然的に上がる分だけ arm_forward と逆方向に引っ張り合うので指定しない。
 
-# 上腕(肩->肘)の前方成分。0=真下, 0.55=鉛直から33度前, 1.0=水平前方
-STAND_ARM_FWD,  SQUAT_ARM_FWD  = 0.00,  0.55
+# 上腕(肩->肘)の前方成分。0=真下, 0.95=鉛直から72度前, 1.0=水平前方
+# 0.95 なら腕が伸びていれば手は肩の約11cm下 = 胸の高さに来る。
+# 0.55 では手の到達点が膝とほぼ同座標になり、腕が膝にめり込む。
+STAND_ARM_FWD,  SQUAT_ARM_FWD  = 0.00,  0.95
+ARM_FWD_MIN = 0.85          # これを下回ると arm_shortfall_pen で大幅減点
 
 # 胴の前傾 [rad]。股関節が足首の真上に来る条件は knee = 2 x |ankle|。
 # ankle の soft 限界が 0.803 なので、踵接地のまま股関節を足の上に保てるのは
@@ -197,6 +200,23 @@ class PeriodicSquatRewardsCfg:
             shoulder_cfg=SHOULDER_CFG, elbow_cfg=ELBOW_CFG, hand_cfg=HAND_BODY_CFG,
         ),
     )
+    # しゃがみ切りで腕が前方に出ていなければ大幅減点 (正報酬だけでは
+    # 「取らなくても損しない」ため、必須要件はコスト側にも置く)
+    arm_shortfall_pen = RewTerm(
+        func=mdp.arm_forward_shortfall_penalty, weight=8.0,
+        params=dict(
+            period=SQUAT_PERIOD, min_forward=ARM_FWD_MIN, std=0.15,
+            shoulder_cfg=SHOULDER_CFG, elbow_cfg=ELBOW_CFG,
+        ),
+    )
+    # 手が膝にめり込んだらマイナス
+    knee_clear_pen = RewTerm(
+        func=mdp.hands_knee_clearance_penalty, weight=4.0,
+        params=dict(
+            min_distance=0.18, std=0.08,
+            hand_cfg=HAND_BODY_CFG, knee_cfg=KNEE_BODY_CFG,
+        ),
+    )
     # 胴が左右に傾いたらマイナス (前傾ピッチは罰しない)
     torso_roll_pen = RewTerm(
         func=mdp.torso_roll_penalty, weight=1.0,
@@ -290,7 +310,7 @@ class G1PeriodicSquatEnvCfg(G1PickupCarryEnvCfg):
         print(f">>> PeriodicSquat v3: period={SQUAT_PERIOD}s")
         print(f"    knee   {STAND_KNEE} -> {SQUAT_KNEE} rad")
         print(f"    height {STAND_HEIGHT} -> {SQUAT_HEIGHT} m")
-        print(f"    arm    上腕の前方成分 {STAND_ARM_FWD} -> {SQUAT_ARM_FWD}")
+        print(f"    arm    上腕の前方成分 {STAND_ARM_FWD} -> {SQUAT_ARM_FWD} (下限 {ARM_FWD_MIN})")
         print(f"    torso  前傾 {TORSO_STAND_PITCH} -> {TORSO_SQUAT_PITCH} rad")
 
 
