@@ -1087,26 +1087,54 @@ def arm_forward_direction(
     squat_forward: float = 0.65,
     std: float = 0.15,
     shoulder_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
-    hand_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    elbow_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
 ) -> torch.Tensor:
-    """腕(肩->手)がどれだけ前方を向いているか [0, 1]。
+    """上腕(肩->肘)がどれだけ前方を向いているか [0, 1]。
 
     立ち位相では真下(0.0)、しゃがみ切りでは squat_forward を目標にする。
     左右それぞれで誤差を取ってから平均するので、片腕だけ前に出して
     平均でごまかす解が成立しない。
 
-    NOTE: shoulder_cfg / hand_cfg は body_names を持つ SceneEntityCfg を
+    「肩->手」で測ると肘を曲げるだけで前方成分を稼げてしまい、肩を回さずに
+    満点が取れる。上腕で測れば肩関節を回す以外に達成手段がない。
+    肘の伸展は arm_extension_penalty が別途担当する。
+
+    NOTE: shoulder_cfg / elbow_cfg は body_names を持つ SceneEntityCfg を
           params で渡すこと。
     """
     depth = _squat_depth(env, period)
 
     sh = _sorted_by_lateral(_bodies_in_yaw_frame(env, shoulder_cfg))   # (N, 2, 3)
-    hd = _sorted_by_lateral(_bodies_in_yaw_frame(env, hand_cfg))
+    el = _sorted_by_lateral(_bodies_in_yaw_frame(env, elbow_cfg))
 
-    v = hd - sh                                                        # (N, 2, 3)
+    v = el - sh                                                        # 上腕ベクトル (N, 2, 3)
     fwd = v[:, :, 0] / (torch.linalg.norm(v, dim=-1) + 1e-6)           # (N, 2)
 
     target = (stand_forward + (squat_forward - stand_forward) * depth).unsqueeze(-1)
     err_sq = ((fwd - target) ** 2).mean(dim=-1)
     return torch.exp(-err_sq / (std * std))
+
+def torso_pitch_tracking(
+    env: "ManagerBasedRLEnv",
+    period: float = 6.0,
+    stand_pitch: float = 0.00,
+    squat_pitch: float = 0.65,
+    std: float = 0.15,
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """胴の前傾角が深さ相応かどうか [0, 1]。
+
+    深いスクワットでは前傾しないと重心が踵より後ろに抜けて後方転倒する。
+    脚の関節追従 (squat_pose_tracking) でも前傾は間接的に決まるが、
+    個々の関節誤差の和なので前傾角そのものがずれても部分点が入ってしまう。
+    重心の前後位置を直接支配する量なので独立した項として明示する。
+
+    projected_gravity_b = (gx, gy, gz)。前傾角 theta に対し gx = sin(theta)。
+    """
+    robot: Articulation = env.scene[robot_cfg.name]
+    depth = _squat_depth(env, period)
+    target = torch.sin(torch.as_tensor(stand_pitch, device=depth.device)
+                       + (squat_pitch - stand_pitch) * depth)
+    err = robot.data.projected_gravity_b[:, 0] - target
+    return torch.exp(-(err * err) / (std * std))
 

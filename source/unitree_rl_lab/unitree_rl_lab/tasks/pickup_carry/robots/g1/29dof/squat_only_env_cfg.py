@@ -43,19 +43,19 @@ SQUAT_PERIOD = 6.0        # 秒 / 1周期 (3秒かけて沈み、3秒かけて�
 #   ankle_pitch : -0.803 (物理 -0.873)
 #   hip_pitch   : -2.26  (物理 -2.531)
 # 下記はすべて soft 限界の内側。
-STAND_HIP_PITCH, SQUAT_HIP_PITCH = -0.10, -1.95
-STAND_KNEE,      SQUAT_KNEE      = 0.30, 2.40    # 137 度 = ほぼ曲げきり
-STAND_ANKLE,     SQUAT_ANKLE     = -0.20, -0.80  # soft 限界 -0.803 ぎりぎり
+STAND_HIP_PITCH, SQUAT_HIP_PITCH = -0.10, -2.10
+STAND_KNEE,      SQUAT_KNEE      = 0.30, 2.20    # 126 度
+STAND_ANKLE,     SQUAT_ANKLE     = -0.20, -0.75  # soft 限界 -0.803 に余裕を残す
 
 # hip_pitch + knee + ankle_pitch が胴の前傾角を決める:
 #   立ち  : -0.10 + 0.30 - 0.20 =  0.00  -> 垂直
-#   完全しゃがみ: -1.95 + 2.40 - 0.80 = -0.35  -> 前傾 20 度
+#   完全しゃがみ: -2.10 + 2.20 - 0.75 = -0.65  -> 前傾 37 度
 # 深いスクワットは前傾しないと重心が踵より後ろに抜けて転ぶ。
 
 # 骨盤高さ = 0.3*cos(ankle) + 0.3*cos(knee - ankle) + 0.13
 #   knee 0.30 -> 0.73 m
-#   knee 2.40 -> 0.33 m  (大腿がほぼ水平 = 完全しゃがみ)
-STAND_HEIGHT, SQUAT_HEIGHT = 0.73, 0.33
+#   knee 2.20 -> 0.39 m  (股関節は足首の 8cm 後ろ。前傾37度で重心を戻す)
+STAND_HEIGHT, SQUAT_HEIGHT = 0.73, 0.39
 
 # === 腕の参照姿勢 ===========================================================
 # 腕の姿勢は次の3つだけで完全に決まる:
@@ -66,8 +66,14 @@ STAND_HEIGHT, SQUAT_HEIGHT = 0.73, 0.33
 # 手の「絶対位置」を別途指定すると腕長の推定値に依存し、腕を前に振ると
 # 手が必然的に上がる分だけ arm_forward と逆方向に引っ張り合うので指定しない。
 
-# 腕(肩->手)の前方成分。0=真下, 0.85=鉛直から58度前, 1.0=水平前方
-STAND_ARM_FWD,  SQUAT_ARM_FWD  = 0.00,  0.85
+# 上腕(肩->肘)の前方成分。0=真下, 0.55=鉛直から33度前, 1.0=水平前方
+STAND_ARM_FWD,  SQUAT_ARM_FWD  = 0.00,  0.55
+
+# 胴の前傾 [rad]。股関節が足首の真上に来る条件は knee = 2 x |ankle|。
+# ankle の soft 限界が 0.803 なので、踵接地のまま股関節を足の上に保てるのは
+# knee <= 1.61 まで。それより深いと股関節は必ず後ろへ抜けるので前傾で戻す。
+# 採用値での重心: COM_x +0.046 / 踵余裕 0.106 / つま先余裕 0.104 (ほぼ均衡)
+TORSO_STAND_PITCH, TORSO_SQUAT_PITCH = 0.00, 0.65
 
 HAND_WIDTH_SCALE = 1.0                        # 手の間隔 = 膝の間隔 x これ
 HAND_WIDTH_MIN   = 0.16                       # 立ち位相でも最低これだけ開く [m]
@@ -110,7 +116,7 @@ _POSE_PARAMS = dict(
 
 @configclass
 class PeriodicSquatRewardsCfg:
-    # ================= 正報酬: タスク達成 (最大 23.0) =================
+    # ================= 正報酬: タスク達成 (最大 26.0) =================
     # 姿勢追従は 2段構え。
     #   coarse(std 0.85): 目標から遠くても勾配が残る -> 学習初期の誘導
     #   fine  (std 0.35): 精度を出さないと入らない   -> 収束後の精度
@@ -130,13 +136,22 @@ class PeriodicSquatRewardsCfg:
             robot_cfg=SceneEntityCfg("robot"),
         ),
     )
+    # 胴の前傾 (重心を踵より前に保つ要。崩れると後方転倒する)
+    torso_pitch = RewTerm(
+        func=mdp.torso_pitch_tracking, weight=3.0,
+        params=dict(
+            period=SQUAT_PERIOD, std=0.15,
+            stand_pitch=TORSO_STAND_PITCH, squat_pitch=TORSO_SQUAT_PITCH,
+            robot_cfg=SceneEntityCfg("robot"),
+        ),
+    )
     # 腕を前方へ振る (肩関節を動かす動機。位置目標より勾配が素直)
     arm_forward = RewTerm(
         func=mdp.arm_forward_direction, weight=5.0,
         params=dict(
             period=SQUAT_PERIOD, std=0.12,
             stand_forward=STAND_ARM_FWD, squat_forward=SQUAT_ARM_FWD,
-            shoulder_cfg=SHOULDER_CFG, hand_cfg=HAND_BODY_CFG,
+            shoulder_cfg=SHOULDER_CFG, elbow_cfg=ELBOW_CFG,
         ),
     )
     # 両手の間隔を「膝幅」に合わせる
@@ -222,7 +237,7 @@ class PeriodicSquatRewardsCfg:
     dof_pos_lim  = RewTerm(func=mdp.joint_pos_limits,  weight=-1.0)
     # 肩は前へ伸ばすので拘束しない。手首だけ暴れないよう弱く抑える。
     wrist_default = RewTerm(
-        func=mdp.joint_deviation_l1, weight=-0.05,
+        func=mdp.joint_deviation_l1, weight=-0.30,
         params=dict(asset_cfg=SceneEntityCfg("robot", joint_names=[".*_wrist_.*"])),
     )
     # 棒立ち   : 約 5.5 / 18.0
@@ -275,7 +290,8 @@ class G1PeriodicSquatEnvCfg(G1PickupCarryEnvCfg):
         print(f">>> PeriodicSquat v3: period={SQUAT_PERIOD}s")
         print(f"    knee   {STAND_KNEE} -> {SQUAT_KNEE} rad")
         print(f"    height {STAND_HEIGHT} -> {SQUAT_HEIGHT} m")
-        print(f"    arm    前方成分 {STAND_ARM_FWD} -> {SQUAT_ARM_FWD}")
+        print(f"    arm    上腕の前方成分 {STAND_ARM_FWD} -> {SQUAT_ARM_FWD}")
+        print(f"    torso  前傾 {TORSO_STAND_PITCH} -> {TORSO_SQUAT_PITCH} rad")
 
 
 @configclass
