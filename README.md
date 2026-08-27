@@ -3,7 +3,8 @@
 ## 参照
 
 [unitree_rl_lab](https://github.com/unitreerobotics/unitree_rl_lab) \
-[IsaacLab2.3.0](https://isaac-sim.github.io/IsaacLab/v2.3.0/source/setup/installation/index.html)
+[IsaacLab2.3.0](https://isaac-sim.github.io/IsaacLab/v2.3.0/source/setup/installation/index.html) \
+[unitree_mujoco](https://github.com/unitreerobotics/unitree_mujoco?tab=readme-ov-file#installation)
 
 ## 目標タスク
 
@@ -14,9 +15,9 @@ Unitree G1の強化学習による開発
 - 瓦礫を掴む
 - 立ち上がる
 
-## 作業内容
+## 環境構築
 
-### 開発環境の構築
+### Isaaclab
 既存のIsaac Labのインストール手順では依存関係で問題が発生するため修正した手順を記す. 
 - Install Isaac Lab 2.3.0 + Isaac Sim 5.1
   
@@ -86,25 +87,40 @@ Unitree G1の強化学習による開発
      ```bash
      ./isaaclab.sh -p scripts/tutorials/00_sim/create_empty.py
      ```
+### 改良版Unitree RL Labのinstall
 
+- Uniree RL lab環境のinstall 
+  - git clone this repository
+    ```bash
+    git clone https://github.com/unitreerobotics/unitree_rl_lab.git
+    ```
+    ```bash
+    conda activate env_isaaclab
+    cd ~/uniree_rl_lab/
+    ./unitree_rl_lab.sh -i
+    # restart your shell to activate the environment changes.
+    ```
+- Unitreeロボットのdescriptionファイルをインストールする
+  ```bash
+  cd ~
+  git clone https://huggingface.co/datasets/unitreerobotics/unitree_model
+  ```
+     
+  ```bash
+  cd ~
+  git clone https://github.com/unitreerobotics/unitree_ros.git
+  ```
+    
+  このあと公式のリポジトリでは以下のようなPATHの書き換え作業があるがこのリポジトリでは自動反映するようにしているため必要ない
+  ```bash
+  UNITREE_MODEL_DIR = "</home/user/projects/unitree_usd>"
+  UNITREE_ROS_DIR = "</home/user/projects/unitree_ros/unitree_ros>"
+  ```
 
-<div align="center">
+### Deploy
 
-| <div align="center"> Isaac Lab </div> | <div align="center">  Mujoco </div> |  
-|--- | --- |
-| [<img src="Materials/Isaaclab.gif" width="240px">](g1_sim.gif) | [<img src="Materials/mujoco.gif" width="240px">](g1_mujoco.gif) | 
-
-</div>
-
-
-
-
-## Deploy
-
-After the model training is completed, we need to perform sim2sim on the trained strategy in Mujoco to test the performance of the model.
-Then deploy sim2real.
-
-### Setup
+モデルの学習が完了したら, Mujocoで学習済みのpolicyに対してsim2simを実行し,モデルの性能を検証する必要がある. 
+その後、sim2realを展開する. 
 
 ```bash
 # Install dependencies
@@ -123,42 +139,112 @@ cmake .. && make
 
 ### Sim2Sim
 
-Installing the [unitree_mujoco](https://github.com/unitreerobotics/unitree_mujoco?tab=readme-ov-file#installation).
+- unitree mujocoのinstall
+  - 依存関係
+    ```bash
+    sudo apt install -y libyaml-cpp-dev libboost-all-dev libeigen3-dev \
+                      libspdlog-dev libfmt-dev \
+                      libglfw3-dev libxinerama-dev libxcursor-dev libxi-dev
+    ```
+    
+  - unitree_sdk2のビルド・インストール
+    ```bash
+    git clone https://github.com/unitreerobotics/unitree_sdk2.git
+    cd unitree_sdk2
+    mkdir build && cd build
+    cmake .. -DBUILD_EXAMPLES=OFF
+    sudo make install sudo apt install -y libyaml-cpp-dev libboost-all-dev libeigen3-dev \
+                          libspdlog-dev libfmt-dev \
+                          libglfw3-dev libxinerama-dev libxcursor-dev libxi-dev
+    ```
+   
+  - mujocoのバイナリ
+    ```bash
+    mkdir -p ~/.mujoco && cd ~/.mujoco
+    wget https://github.com/google-deepmind/mujoco/releases/download/3.3.6/mujoco-3.3.6-linux-x86_64.tar.gz
+    tar -xzf mujoco-3.3.6-linux-x86_64.tar.gz
+    ``` 
 
-- Set the `robot` at `/simulate/config.yaml` to g1
-- Set `domain_id` to 0
-- Set `enable_elastic_hand` to 1
-- Set `use_joystck` to 1.
+  - uniree mujocoのビルド
+    ```bash
+    git clone https://github.com/unitreerobotics/unitree_mujoco.git
+    cd unitree_mujoco/simulate
+    ln -s ~/.mujoco/mujoco-3.3.6 mujoco
 
-```bash
-# start simulation
-cd unitree_mujoco/simulate/build
-./unitree_mujoco
-# ./unitree_mujoco -i 0 -n eth0 -r g1 -s scene_29dof.xml # alternative
-```
+    mkdir build && cd build
+    cmake ..
+    make -j4
+    ```
+       
+  - uniree_rl_labのrobotcontollerのビルド
+    ```bash
+    cd ~/unitree_rl_lab/deploy/robots/g1_29dof
+    mkdir build && cd build
+    cmake .. && make
+    ```
 
-```bash
-cd unitree_rl_lab/deploy/robots/g1_29dof/build
-./g1_ctrl
-# 1. press [L2 + Up] to set the robot to stand up
-# 2. Click the mujoco window, and then press 8 to make the robot feet touch the ground.
-# 3. Press [R1 + X] to run the policy.
-# 4. Click the mujoco window, and then press 9 to disable the elastic band.
-```
+- 設定
+  - Set the `robot` at `/simulate/config.yaml` to g1
+  - Set `domain_id` to 0
+  - Set `enable_elastic_hand` to 1
+  - Set `use_joystck` to 0.
 
-### Sim2Real
 
-You can use this program to control the robot directly, but make sure the on-borad control program has been closed.
 
-```bash
-./g1_ctrl --network eth0 # eth0 is the network interface name.
-```
 
-## Acknowledgements
+<div align="center">
 
-This repository is built upon the support and contributions of the following open-source projects. Special thanks to:
+| <div align="center"> Isaac Lab </div> | <div align="center">  Mujoco </div> |  
+|--- | --- |
+| [<img src="Materials/Isaaclab.gif" width="240px">](g1_sim.gif) | [<img src="Materials/mujoco.gif" width="240px">](g1_mujoco.gif) | 
 
-- [IsaacLab](https://github.com/isaac-sim/IsaacLab): The foundation for training and running codes.
-- [mujoco](https://github.com/google-deepmind/mujoco.git): Providing powerful simulation functionalities.
-- [robot_lab](https://github.com/fan-ziqi/robot_lab): Referenced for project structure and parts of the implementation.
-- [whole_body_tracking](https://github.com/HybridRobotics/whole_body_tracking): Versatile humanoid control framework for motion tracking.
+</div>
+
+## 学習
+- train
+  ```bash
+  python scripts/rsl_rl/train.py --task Unitree-G1-29dof-<task_name> --num_envs <Number of Parallel Processes> --max_iterations <Number of train> 
+  ```
+  例：PeriodicSquatタスクを64並列処理で3000回学習する場合
+  ```bash
+  python scripts/rsl_rl/train.py --task Unitree-G1-29dof-PeriodicSquat --num_envs 64 --max_iterations 3000 
+  ```
+
+- play
+  ```bash
+  python scripts/rsl_rl/play.py --task Unitree-G1-29dof-<run_name> --checkpoint logs/rsl_rl/g1_pickup_carry/<run_dir_name>/<model>.pt
+  ```
+  例：PeriodicSquatタスクの2026-8-24_16-54-51のログファイルの中にあるmodel_600.ptを再生する場合
+  ```bash
+  python scripts/rsl_rl/play.py --task Unitree-G1-29dof-PeriodicSquat --checkpoint logs/rsl_rl/g1_pickup_carry/2026-08-24_16-54-51/model_600.pt
+  ```
+  
+- restart train 
+  ```bash
+  python scripts/rsl_rl/train.py --task Unitree-G1-29dof-PeriodicSquat \
+  --resume True --load_run <run_dir_name> --checkpoint model_1500.pt \
+  --max_iterations 3000
+  ```
+
+## Sim2Sim Mujoco
+- 学習済みのポリシーをplayする
+  ```bash
+  python scripts/rsl_rl/play.py --task Unitree-G1-29dof-PeriodicSquat --checkpoint logs/rsl_rl/g1_pickup_carry/2026-08-24_16-54-51/model_600.pt
+  ```
+- taskを配置する
+  `unitree_rl_lab/deploy/mujoco_py/task/`にフォルダーを作成する. \
+  このフォルダーに先程playしたポリシーのログファイルの中にある`params/deploy.yaml`と`exported/policy.onnx`を配置し, `task.yaml`を作成・記述し配置する. 記述方法は`deploy/mujoco_py`にあるREADME.mdを参照
+
+- mujocoで再生
+  ```bash
+  cd ~/unitree_rl_lab/deploy/mujoco_py
+  python run_mujoco.py --task <task_name> 
+  ```
+  例：タスク名がsquatだった場合
+  ```bash
+  cd ~/unitree_rl_lab/deploy/mujoco_py
+  python run_mujoco.py --task squat 
+  ```
+
+  
+  
