@@ -1,8 +1,7 @@
 # DDS不要 MuJoCo ランナー(G1-29dof / マルチタスク)
 
 `unitree_mujoco` も `g1_ctrl` も DDS もジョイスティックも使わず、export した方策
-(`policy.onnx`)を MuJoCo で直接動かして可視化します。**タスクごとにフォルダを分け、
-同じ `run_mujoco.py` で切り替えて実行**できます。
+(`policy.onnx`)を MuJoCo で直接動かして可視化
 
 ## 構成
 ```
