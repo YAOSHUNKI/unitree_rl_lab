@@ -1,14 +1,45 @@
-"""SquatStandLift 用の PPO 設定。学習ハイパーパラメータは共有する。"""
+"""PPO runner config for the SquatStandLift task."""
 
 from isaaclab.utils import configclass
-
-from unitree_rl_lab.tasks.squat_only.agents.rsl_rl_ppo_cfg import (
-    G1PickupCarryPPORunnerCfg,
+from isaaclab_rl.rsl_rl import (
+    RslRlOnPolicyRunnerCfg,
+    RslRlPpoActorCriticCfg,
+    RslRlPpoAlgorithmCfg,
 )
 
 
 @configclass
-class G1SquatBoxLiftPPORunnerCfg(G1PickupCarryPPORunnerCfg):
-    """箱把持・立ち上がりタスク専用のログ出力設定。"""
+class G1PickupCarryPPORunnerCfg(RslRlOnPolicyRunnerCfg):
+    num_steps_per_env = 24
+    max_iterations = 40000
+    save_interval = 200
+    experiment_name = "g1_pickup_carry"
+    empirical_normalization = True
 
-    experiment_name = "squat_box_lift"
+    policy = RslRlPpoActorCriticCfg(
+        init_noise_std=0.8,
+        actor_hidden_dims=[512, 256, 128],
+        critic_hidden_dims=[512, 256, 128],
+        activation="elu",
+    )
+    algorithm = RslRlPpoAlgorithmCfg(
+        value_loss_coef=1.0,
+        use_clipped_value_loss=True,
+        clip_param=0.2,
+        entropy_coef=0.005,
+        num_learning_epochs=5,
+        num_mini_batches=4,
+        learning_rate=3.0e-4,
+        schedule="adaptive",
+        gamma=0.99,
+        lam=0.95,
+        desired_kl=0.01,
+        max_grad_norm=1.0,
+    )
+
+
+@configclass
+class G1SquatStandLiftPPORunnerCfg(G1PickupCarryPPORunnerCfg):
+    """SquatStandLift 専用のログ出力設定。"""
+
+    experiment_name = "squat_stand_lift"

@@ -5,11 +5,12 @@ Isaac Lab + rsl_rl で学習させるタスク。最終的には床の箱を拾�
 
 | | |
 |---|---|
-| 実装 | `mdp/rewards.py` (1117 行 / 50 関数 = 公開 42 + 内部ヘルパー 8) |
-| 設定 | `robots/g1/29dof/squat_only_env_cfg.py` (371 行) |
+| 実装 | `mdp/rewards.py` (1204 行 / 53 関数 = 公開 44 + 内部ヘルパー 9) |
+| 設定 | `robots/g1/29dof/squat_only_env_cfg.py` (390 行) |
 | 周期 | 6.0 秒 (3 秒で沈み、3 秒で立つ) |
-| 配点 | 正報酬 最大 36.0 / ペナルティ 最小 −20.0 |
-| 棒立ちの得点 | 1 step 3.48 / 完璧 27.75（比 8.0 倍） |
+| 配点 | 正報酬 最大 39.0 / ペナルティ 最小 −29.0 |
+| 棒立ちの得点 | 1 step 4.15 / 完璧 27.97（比 6.7 倍） |
+| 腕だけ伸ばす | 1 step 4.45（膝ゲートで棒立ちとほぼ同点） |
 
 ---
 
@@ -66,12 +67,12 @@ python scripts/rsl_rl/play.py --task Unitree-G1-29dof-PeriodicSquat-Play --num_e
 | ファイル | 行数 | 状態 | 内容 |
 |---|---:|---|---|
 | `README.md` | — | 追加 | このドキュメント |
-| `mdp/rewards.py` | 1117 | 追加 | 全報酬関数（50） |
+| `mdp/rewards.py` | 1204 | 追加 | 全報酬関数（53） |
 | `mdp/rewards.py.bak` | 1140 | 一時 | 未使用関数削除前のバックアップ。不要なら削除可 |
 | `mdp/observations.py` | 101 | 追加 | 箱の相対位置、手の位置、位相観測 |
 | `mdp/events.py` | 55 | 追加 | 箱のリセット |
 | `mdp/__init__.py` | 15 | 追加 | Isaac Lab / locomotion の mdp を再エクスポート |
-| `robots/g1/29dof/squat_only_env_cfg.py` | 371 | 追加 | **周期スクワットの環境設定（主戦場）** |
+| `robots/g1/29dof/squat_only_env_cfg.py` | 390 | 追加 | **周期スクワットの環境設定（主戦場）** |
 | `robots/g1/29dof/pickup_carry_env_cfg.py` | 340 | 追加 | 箱タスクの環境設定 |
 | `robots/g1/29dof/__init__.py` | 48 | 追加 | gym 登録（4 タスク） |
 | `agents/rsl_rl_ppo_cfg.py` | 38 | 追加 | PPO 設定 |
@@ -237,25 +238,28 @@ target = stand_value + (squat_value - stand_value) * depth
 
 ## 配点（squat_only_env_cfg.py の PeriodicSquatRewardsCfg）
 
-### 正報酬 — タスク達成（最大 36.0）
+### 正報酬 — タスク達成（最大 39.0）
 
 追従項（`pose_*` / `height_track` / `torso_pitch` / `arm_pose_*` / `arm_forward`）は
 **アイドル基準を差し引いた値**（`_relative_track`）。棒立ちでは 0 点になる。
 
+腕系（`g` 印）はさらに**膝の曲がりで乗算ゲート**（`_knee_gate`）される。
+膝 0.30 rad で 0 倍、1.20 rad で 1 倍。**しゃがまない限り腕の点は入らない**（落とし穴 13）。
+
 | cfg 名 | 関数 | weight | σ | 役割 |
 |---|---|---:|---|---|
-| `pose_coarse` | `squat_pose_tracking` | 4.0 | 0.85 | 脚の参照姿勢へ粗く誘導 |
+| `pose_coarse` | `squat_pose_tracking` | 5.0 | 1.80 | 脚の参照姿勢へ粗く誘導 |
 | `pose_fine` | `squat_pose_tracking` | 8.0 | 0.35 | 同じ姿勢を高精度で要求 |
-| `height_track` | `squat_height_tracking` | 3.0 | 0.16 | 骨盤高さの追従 |
-| `torso_pitch` | `torso_pitch_tracking` | 3.0 | 0.20 | 胴の前傾 = 重心の前後位置 |
-| `arm_pose_coarse` | `arm_pose_tracking` | 4.0 | 0.60 | 肩・肘の関節目標へ粗く誘導 |
-| `arm_pose_fine` | `arm_pose_tracking` | 6.0 | 0.25 | 同・精度 |
-| `arm_forward` | `arm_forward_direction` | 3.0 | 0.30 | world 座標での向きの確認 |
-| `hands_width` | `hands_width_match` | 1.0 | 0.06 | 両手の間隔を膝幅に |
-| `upright` | `upright_bonus` | 2.0 | — | 合計を正に保つ床（落とし穴 2） |
-| `grounded` | `feet_grounded` | 2.0 | — | 同上 |
+| `height_track` | `squat_height_tracking` | 3.0 | 0.24 | 骨盤高さの追従 |
+| `torso_pitch` | `torso_pitch_tracking` | 3.0 | 0.40 | 胴の前傾 = 重心の前後位置 |
+| `arm_pose_coarse` | `arm_pose_tracking` | 4.0 | 0.60 | 肩・肘の関節目標へ粗く誘導 `g` |
+| `arm_pose_fine` | `arm_pose_tracking` | 6.0 | 0.25 | 同・精度 `g` |
+| `arm_forward` | `arm_forward_direction` | 3.0 | 0.30 | world 座標での向きの確認 `g` |
+| `hands_width` | `hands_width_match` | 1.0 | 0.06 | 両手の間隔を膝幅に `g` |
+| `upright` | `upright_bonus` | 3.0 | — | 合計を正に保つ床（落とし穴 2） |
+| `grounded` | `feet_grounded` | 3.0 | — | 同上 |
 
-### ペナルティ — 崩れた分だけマイナス（最小 −20.0）
+### ペナルティ — 崩れた分だけマイナス（最小 −29.0）
 
 **depth ゲート付き**の項（`d` 印）は立ち位相で 0。学習初期のふらつきを罰しないので、
 合計が負に沈んで「早く終了したほうが得」になるのを防ぐ。
@@ -263,18 +267,20 @@ target = stand_value + (squat_value - stand_value) * depth
 | cfg 名 | 関数 | weight | σ | 役割 |
 |---|---|---:|---|---|
 | `arm_shortfall_pen` | `arm_forward_shortfall_penalty` | 2.0 | 0.60 | 腕が前に出ていない `d` |
-| `squat_shortfall_pen` | `squat_depth_shortfall_penalty` | 1.5 | 0.90 | しゃがみが浅い `d` |
+| `squat_shortfall_pen` | `squat_depth_shortfall_penalty` | 3.0 | 0.90 | しゃがみが浅い `d` |
 | `hip_abduction_pen` | `hip_abduction_tracking` | 3.0 | 0.12 | 開脚（hip_roll） `d` |
 | `stance_pen` | `stance_width_penalty_phased` | 2.5 | 0.08 | 足幅の広がり `d` |
 | `knee_clear_pen` | `hands_knee_clearance_penalty` | 2.0 | 0.08 | 手が膝にめり込む `d` |
-| `waist_pitch_pen` | `waist_pitch_penalty` | 2.0 | 0.12 | 胴の反り |
+| `backlean_pen` | `torso_backlean_penalty` | 3.0 | 0.15 | 体全体を後ろに反らす |
+| `waist_pitch_pen` | `waist_pitch_penalty` | 4.0 | 0.12 | 腰から上だけの反り |
 | `arm_ext_pen` | `arm_extension_penalty` | 1.5 | 0.10 | 肘の曲がり `d` |
 | `wrist_pen` | `wrist_neutral_penalty` | 1.5 | 0.25 | 手首のひねり `d` |
 | `drift_pen` | `drift_penalty` | 1.0 | 0.25 | 水平ドリフト |
 | `slip_pen` | `feet_slip_penalty` | 1.0 | 0.30 | 足の滑り |
 | `hands_sym_pen` | `hands_symmetry_penalty` | 0.5 | 0.10 | 手の左右非対称 |
 | `torso_roll_pen` | `torso_roll_penalty` | 1.0 | 0.25 | 胴の左右傾き |
-| `heading_pen` | `heading_penalty` | 0.5 | — | ヨー方向のずれ |
+| `heading_pen` | `heading_penalty` | 2.0 | — | ヨー方向のずれ（向き） |
+| `yaw_rate_pen` | `yaw_rate_penalty` | 2.0 | 0.50 | その場回転（角速度）|
 | `speed_pen` | `base_speed_penalty` | 0.5 | 0.40 | 水平速度 |
 
 ### 正則化
@@ -480,6 +486,34 @@ straightness = ||肩->手|| / (||肩->肘|| + ||肘->手||)
 
 ### 内部ヘルパー
 
+#### `torso_backlean_penalty(env, margin=0.10, std=0.15, robot_cfg)` → [-1,0]
+
+胴が**後ろに反った分だけ**罰する。片側・位相非依存。
+
+`projected_gravity_b[:, 0]` は前傾で正、後傾で負。直立（gx=0）と任意の前傾は無罰、
+`margin`（約 6 度）を超えて反った分だけマイナス。反り 11 度で -0.36、20 度で -0.94。
+
+`torso_pitch_tracking` は `_relative_track` を通すので、反っても
+**「0 点になるだけ」でコストが無い**（落とし穴 14）。深いしゃがみで腕を前に出すと
+重心が前へ移るため、方策はそれを上体を反らして相殺しようとする。
+
+骨盤基準なので「体全体が後ろに倒れる」動きを見る。腰から上だけ反らす動きは
+`waist_pitch_penalty` が担当（落とし穴 9）。**2 つセットで使うこと。**
+
+#### `_knee_gate(env, knee_cfg, stand_knee=0.30, gate_knee=1.20)` → [0,1]
+
+膝の曲がり具合。**腕の正報酬を開ける鍵**として乗算で使う。
+膝 0.30 rad（立ち）で 0、1.20 rad で 1。位相ではなく実際の膝角で測る。
+
+腕を前に出すのは転倒リスクが無く、脚と同じだけ点が取れるので、
+これが無いと方策は「立ったまま腕だけ伸ばす」で止まる（落とし穴 13）。
+
+#### `yaw_rate_penalty(env, std=0.50, robot_cfg)` → [-1,0]
+
+ヨー角速度そのものを罰する。Isaac Lab の `ang_vel_xy_l2` は x, y しか見ておらず
+**z（ヨー）は完全に無罰**。`heading_penalty` は向きしか見ないので
+90 度ずれても -0.5 にしかならず、ゆっくり回り続ける解を潰せない。
+
 #### `_relative_track(err_sq, idle_err_sq, std, floor=0.25)` → [0,1]
 
 追従項の共通後段。**「何もしなかった場合の得点」を 0 に、満点を 1 に再スケールする。**
@@ -646,6 +680,51 @@ KL が跳ねて、adaptive スケジューラが学習率を下限まで割り�
 関節角はどの部位でも同じ rad 単位なので、**この値が同じオーダーに収まっていること**。
 可動範囲が狭い量は σ も狭くしたくなるが、そこは落とし穴 11 の基準差し引きで解く。
 
+### 13. 安全に取れる報酬は、危険な報酬より先に解かれて学習が止まる
+
+腕を前に出すのは転倒リスクがゼロ。しゃがむのは転倒リスクが高い。
+配点が同じなら方策は**必ず安全な方だけを解いて、そこで止まる**。
+
+| 進捗 | 10% | 20% | 30% | 50% |
+|---|---:|---:|---:|---:|
+| 脚を動かした時の取り分（危険） | 0.66 | 1.39 | 2.23 | 4.38 |
+| 腕を動かした時の取り分（安全） | 0.75 | 1.56 | 2.44 | 4.52 |
+
+腕だけで 9.6 点まで独立に取り切れてしまい、「立ったまま腕を伸ばして
+その場で回る」で収束した。回転が出たのは、やることが尽きた上に
+ヨー角速度が無罰（`ang_vel_xy_l2` は z を見ない）だったため。
+
+**対処**: 危険な方の達成度で安全な方の報酬を**乗算ゲート**する（`_knee_gate`）。
+「しゃがまない限り腕の点は入らない」にすると順序が強制される。
+
+**一般則**: 複数の目標を同時に学習させるとき、リスクが非対称なら配点も
+非対称にするか、依存関係をゲートで明示する。並列に置くと安全な方だけが解かれる。
+
+### 14. `_relative_track` は「逆方向にやる」を無罰にする
+
+`_relative_track` は `clamp(min=0)` するので、目標から**アイドル側を越えて逆方向**に
+行っても 0 点で下げ止まる。つまり**何もしないのと同じ扱い**になる。
+
+`torso_pitch`（σ0.40 / weight 3.0）の実測:
+
+| 胴の状態 | 取り分 |
+|---|---:|
+| 正しく前傾（満点） | 2.10 |
+| 直立のまま | 0.00 |
+| 10 度 反る | 0.00 |
+| 20 度 反る | 0.00 |
+| 30 度 反る | **0.00** |
+
+反りは「機会損失」でしかなく、それで別の制約（重心を後ろに戻す）が満たせるなら
+方策は迷わず反る。実際「しゃがんで腕を前に出す」と重心が前へ移るので、
+上体を反らして相殺する解が出た。
+
+**対処**: 追従項に加えて、**逆方向だけを見る片側ペナルティ**を必ず組にする
+（`torso_pitch_tracking` ↔ `torso_backlean_penalty`）。
+
+**一般則**: 正報酬を 0 で下げ止めた項は、その先の領域を自分では守れない。
+「行きすぎ」「逆走」を防ぐのはペナルティ側の仕事。
+
 ---
 
 ## 学習時に見る指標
@@ -665,7 +744,10 @@ KL が跳ねて、adaptive スケジューラが学習率を下限まで割り�
 | `pose_fine` | 上昇し続ける | 頭打ち → 参照姿勢が不安定 |
 | `torso_pitch` | 2.4 以上 / 3.0 | 低い → 前傾できず重心が後ろのまま |
 | `arm_shortfall_pen` | -0.3 以上 | -1.0 以下 → 腕が前に出ていない |
-| `squat_shortfall_pen` | -0.3 以上 | -0.6 付近で張り付き → 棒立ちのまま |
+| `squat_shortfall_pen` | -0.3 以上 | -1.2 付近で張り付き → 棒立ちのまま |
+| `yaw_rate_pen` | -0.2 以上 | -1.0 以下 → その場回転している |
+| `backlean_pen` | -0.3 以上 | -1.5 以下 → 体を後ろに反らしている |
+| `arm_pose_fine` | `pose_fine` と一緒に上がる | 先行して上がる → 膝ゲートが効いていない |
 | `arm_forward_coarse` | 上昇 | 横ばい → 肩が物理的に動かせない |
 | `wrist_pen` | -0.3 以上 | -2.0 以下 → 手首をひねって逃げている |
 | `waist_pitch_pen` | -0.3 以上 | -2.0 以下 → 上体を反らせている |
@@ -681,6 +763,8 @@ KL が跳ねて、adaptive スケジューラが学習率を下限まで割り�
 
 | 日付 | 変更 | 理由 |
 |---|---|---|
+| 08-28 | `torso_backlean_penalty`（3.0 / margin 0.10 / σ0.15）を新設。`waist_pitch_pen` を 2.0→4.0 に戻す | `torso_pitch_tracking` は `_relative_track` の `clamp(min=0)` により、反っても 0 点止まりで**無罰**だった（落とし穴 14）。しゃがんで腕を前に出すと重心が前へ移るため、方策が上体を反らして相殺していた。結果: しゃがみ+反り20度 23.10 < 完璧 27.97（4.9 点の損）、直立・前傾は無罰のまま |
+| 08-28 | **腕の正報酬に膝ゲート `_knee_gate` を導入**（`arm_pose_*` / `arm_forward` / `hands_width`）。`yaw_rate_penalty`（2.0）を新設、`heading_pen` 0.5→2.0。`pose_coarse` σ0.85→1.80・weight 4→5、`height` σ0.16→0.24、`torso` σ0.20→0.40。`squat_shortfall_pen` 1.5→3.0、`upright`/`grounded` 2.0→3.0 | 腕は転倒リスク無しで脚と同じ点が取れるため、方策が「立ったまま腕だけ伸ばしてその場で回る」で収束した（落とし穴 13）。回転は `ang_vel_xy_l2` が z を見ておらず無罰だったため。結果: 腕だけ 4.45 ≒ 棒立ち 4.15、回転 0.83（損）、半分 12.90 / 完璧 27.97 |
 | 08-28 | **σ を元に戻し（腕 0.214/0.088→0.60/0.25、高さ 0.103→0.16、胴 0.15→0.20、腕向き 0.15→0.30）、代わりに `_relative_track`（アイドル基準の差し引き）を導入**。全ペナルティの重みを約半分に、`abd`/`stance`/`kclear`/`wrist` に depth ゲートを追加。`upright`/`grounded` を 0.5→2.0 | 同日の σ 詰めで腕 fine の 1 rad 感度が 775（脚の 12 倍）になり、報酬地形が荒れて KL 発散 → 学習率が下限に張り付いた（落とし穴 12）。棒立ち対策は σ ではなく基準の差し引きで行うのが正解（落とし穴 11）。結果: 棒立ち 3.48 / 完璧 27.75（比 8.0 倍）、学習初期も +1.7 で正 |
 | 08-28 | σ を可動範囲比で再設定（腕 coarse 0.70→0.214 / 腕 fine 0.25→0.088 / 高さ 0.15→0.103）。`squat_depth_shortfall_penalty`（6.0）を追加。`arm_shortfall_pen` 8.0→10.0、`hands_width` 2.0→1.0 | 棒立ちが 1 step 10.87 点（1 エピソード 130 点）で完璧の 34% を稼いでいた。σ が腕の可動範囲より広く「動かさなくても満点近く」だったのが主因（落とし穴 11）。修正後 棒立ち 4.38 / 完璧 31.31（比 1.8 倍 → 7.2 倍）|
 | 08-28 | パッケージ名を `tasks/pickup_carry/` → `tasks/squat_only/` にリネーム。参照 17 ファイルを書き換え | 中身が箱タスクではなく共有 MDP ライブラリ + スクワットタスクになっており、名前が実態と合っていなかった。gym ID・クラス名・`experiment_name` は互換のため維持 |

@@ -1,11 +1,11 @@
-# squat_only — 報酬関数リファレンス
+# squat_stand_lift — 報酬関数リファレンス
 
 Unitree G1 29DOF に「その場で周期的にスクワットしながら両手を前へ伸ばす」動作を
 学習させるための報酬関数群。
 
 - 実装: `mdp/rewards.py`
-- 設定: `robots/g1/29dof/squat_only_env_cfg.py`
-- タスク ID: `Unitree-G1-29dof-PeriodicSquat`
+- 設定: `robots/g1/29dof/squat_stand_lift_env_cfg.py`
+- タスク ID: `Unitree-G1-29dof-SquatStandLift`
 - 周期: 6.0 秒 / 正報酬 最大 26.0 / ペナルティ 最小 -20.5
 
 ---
@@ -244,7 +244,7 @@ straightness = ||肩->手|| / (||肩->肘|| + ||肘->手||)
 
 ## 参照姿勢の定数
 
-`squat_only_env_cfg.py` 冒頭。運動学で重心を検算した上で決めている (原則 4)。
+`squat_stand_lift_env_cfg.py` 冒頭。運動学で重心を検算した上で決めている (原則 4)。
 
 | 定数 | 立ち | 完全しゃがみ | soft 限界 | 備考 |
 |---|---:|---:|---|---|

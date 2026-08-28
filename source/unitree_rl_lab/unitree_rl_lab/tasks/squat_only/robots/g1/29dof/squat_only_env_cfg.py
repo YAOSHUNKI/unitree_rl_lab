@@ -129,6 +129,13 @@ _POSE_PARAMS = dict(
 )
 
 
+# 腕の正報酬を開ける「膝の曲がり」ゲート。
+# しゃがまずに腕だけ伸ばして稼ぐ局所解を塞ぐ (落とし穴 13)。
+GATE_KNEE = 1.20            # 目標 SQUAT_KNEE=2.20 の約半分で満開
+_GATE_PARAMS = dict(
+    knee_gate_cfg=KNEE_CFG, gate_stand_knee=STAND_KNEE, gate_knee=GATE_KNEE,
+)
+
 _ARM_PARAMS = dict(
     period=SQUAT_PERIOD,
     stand_shoulder_pitch=STAND_SHOULDER_PITCH, squat_shoulder_pitch=SQUAT_SHOULDER_PITCH,
@@ -136,6 +143,7 @@ _ARM_PARAMS = dict(
     shoulder_pitch_cfg=SH_PITCH_CFG,
     elbow_cfg=ELBOW_JOINT_CFG,
     shoulder_yaw_cfg=SH_YAW_CFG,
+    **_GATE_PARAMS,
 )
 
 
@@ -146,8 +154,8 @@ class PeriodicSquatRewardsCfg:
     #   coarse(std 0.85): 目標から遠くても勾配が残る -> 学習初期の誘導
     #   fine  (std 0.35): 精度を出さないと入らない   -> 収束後の精度
     pose_coarse = RewTerm(
-        func=mdp.squat_pose_tracking, weight=4.0,
-        params=dict(std=0.85, **_POSE_PARAMS),
+        func=mdp.squat_pose_tracking, weight=5.0,
+        params=dict(std=1.80, **_POSE_PARAMS),
     )
     pose_fine = RewTerm(
         func=mdp.squat_pose_tracking, weight=8.0,
@@ -156,7 +164,7 @@ class PeriodicSquatRewardsCfg:
     height_track = RewTerm(
         func=mdp.squat_height_tracking, weight=3.0,
         params=dict(
-            period=SQUAT_PERIOD, std=0.16,
+            period=SQUAT_PERIOD, std=0.24,
             stand_height=STAND_HEIGHT, squat_height=SQUAT_HEIGHT,
             robot_cfg=SceneEntityCfg("robot"),
         ),
@@ -165,7 +173,7 @@ class PeriodicSquatRewardsCfg:
     torso_pitch = RewTerm(
         func=mdp.torso_pitch_tracking, weight=3.0,
         params=dict(
-            period=SQUAT_PERIOD, std=0.20,
+            period=SQUAT_PERIOD, std=0.40,
             stand_pitch=TORSO_STAND_PITCH, squat_pitch=TORSO_SQUAT_PITCH,
             robot_cfg=SceneEntityCfg("robot"),
         ),
@@ -187,6 +195,7 @@ class PeriodicSquatRewardsCfg:
     arm_forward = RewTerm(
         func=mdp.arm_forward_direction, weight=3.0,
         params=dict(
+            **_GATE_PARAMS,
             period=SQUAT_PERIOD, std=0.30,
             stand_forward=STAND_ARM_FWD, squat_forward=SQUAT_ARM_FWD,
             shoulder_cfg=SHOULDER_CFG, elbow_cfg=ELBOW_CFG,
@@ -198,16 +207,16 @@ class PeriodicSquatRewardsCfg:
         func=mdp.hands_width_match, weight=1.0,
         params=dict(
             width_scale=HAND_WIDTH_SCALE, min_width=HAND_WIDTH_MIN, std=0.06,
-            hand_cfg=HAND_BODY_CFG, knee_cfg=KNEE_BODY_CFG,
+            hand_cfg=HAND_BODY_CFG, knee_cfg=KNEE_BODY_CFG, **_GATE_PARAMS,
         ),
     )
     # 合計を正に保つ床 (転倒判定は終了条件が担当するので小さく)
     upright = RewTerm(
-        func=mdp.upright_bonus, weight=2.0,
+        func=mdp.upright_bonus, weight=3.0,
         params=dict(robot_cfg=SceneEntityCfg("robot")),
     )
     grounded = RewTerm(
-        func=mdp.feet_grounded, weight=2.0,
+        func=mdp.feet_grounded, weight=3.0,
         params=dict(sensor_cfg=FOOT_SENSOR_CFG, force_threshold=1.0),
     )
 
@@ -246,7 +255,7 @@ class PeriodicSquatRewardsCfg:
     )
     # しゃがみが浅ければ大幅減点 (腕と同じく必須要件をコスト側にも置く)
     squat_shortfall_pen = RewTerm(
-        func=mdp.squat_depth_shortfall_penalty, weight=1.5,
+        func=mdp.squat_depth_shortfall_penalty, weight=3.0,
         params=dict(
             period=SQUAT_PERIOD, stand_knee=STAND_KNEE, squat_knee=SQUAT_KNEE,
             min_ratio=0.85, std=0.90, knee_cfg=KNEE_CFG,
@@ -261,8 +270,13 @@ class PeriodicSquatRewardsCfg:
         ),
     )
     # 胴を反らせたらマイナス (骨盤基準の projected_gravity では検出できない)
+    # 胴を後ろに反らす (torso_pitch は _relative_track なので反っても 0 点止まりで無罰)
+    backlean_pen = RewTerm(
+        func=mdp.torso_backlean_penalty, weight=3.0,
+        params=dict(margin=0.10, std=0.15, robot_cfg=SceneEntityCfg("robot")),
+    )
     waist_pitch_pen = RewTerm(
-        func=mdp.waist_pitch_penalty, weight=2.0,
+        func=mdp.waist_pitch_penalty, weight=4.0,
         params=dict(max_abs=0.10, std=0.12, robot_cfg=WAIST_PITCH_CFG),
     )
     # 胴が左右に傾いたらマイナス (前傾ピッチは罰しない)
@@ -272,8 +286,13 @@ class PeriodicSquatRewardsCfg:
     )
     # 胴が正面からヨー方向にずれたらマイナス
     heading_pen = RewTerm(
-        func=mdp.heading_penalty, weight=0.5,
+        func=mdp.heading_penalty, weight=2.0,
         params=dict(robot_cfg=SceneEntityCfg("robot")),
+    )
+    # ang_vel_xy_l2 は z (ヨー) を見ないため、その場回転がほぼ無料だった。
+    yaw_rate_pen = RewTerm(
+        func=mdp.yaw_rate_penalty, weight=2.0,
+        params=dict(std=0.50, robot_cfg=SceneEntityCfg("robot")),
     )
     speed_pen = RewTerm(
         func=mdp.base_speed_penalty, weight=0.5,

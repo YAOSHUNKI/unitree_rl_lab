@@ -93,6 +93,26 @@ def _relative_track(
     return ((raw - base) / (1.0 - base).clamp(min=floor)).clamp(min=0.0, max=1.0)
 
 
+def _knee_gate(
+    env: "ManagerBasedRLEnv",
+    knee_cfg: SceneEntityCfg,
+    stand_knee: float = 0.30,
+    gate_knee: float = 1.20,
+) -> torch.Tensor:
+    """膝がどれだけ曲がっているか [0, 1]。腕の報酬を開ける鍵。
+
+    腕を前に出すのは転倒リスクが無く、脚と同じだけ点が取れてしまうため、
+    方策は「立ったまま腕だけ伸ばす」局所解に落ちる (落とし穴 13)。
+    腕側の正報酬をこの値で乗算し、**しゃがまない限り腕の点が入らない**ようにする。
+
+    位相ではなく実際の膝角で測るので「今この瞬間しゃがんでいるか」を見る。
+    gate_knee (既定 1.20 rad = 目標 2.20 の約半分) で満開。
+    """
+    robot: Articulation = env.scene[knee_cfg.name]
+    knee = robot.data.joint_pos[:, knee_cfg.joint_ids].mean(dim=-1)
+    return ((knee - stand_knee) / (gate_knee - stand_knee)).clamp(min=0.0, max=1.0)
+
+
 def is_grasped(
     env: "ManagerBasedRLEnv",
     object_cfg: SceneEntityCfg,
@@ -549,6 +569,24 @@ def heading_penalty(
     return heading_hold(env, robot_cfg=robot_cfg) - 1.0
 
 
+def yaw_rate_penalty(
+    env: "ManagerBasedRLEnv",
+    std: float = 0.50,
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """ヨー角速度の分だけマイナス [-1, 0]。
+
+    Isaac Lab の ang_vel_xy_l2 は x, y しか見ておらず z (ヨー) は無罰。
+    heading_penalty は「向き」しか見ないので、ゆっくり回り続ける解を
+    十分に潰せない (90 度ずれても -0.5)。角速度そのものを直接罰する。
+
+    静止で 0、0.5 rad/s で -0.63、1.5 rad/s 以上でほぼ -1 に飽和。
+    """
+    robot: Articulation = env.scene[robot_cfg.name]
+    wz = robot.data.root_ang_vel_b[:, 2]
+    return torch.exp(-(wz * wz) / (std * std)) - 1.0
+
+
 def feet_slip_penalty(
     env: "ManagerBasedRLEnv",
     std: float = 0.15,
@@ -737,6 +775,9 @@ def hands_width_match(
     std: float = 0.06,
     hand_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
     knee_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    knee_gate_cfg: SceneEntityCfg | None = None,
+    gate_stand_knee: float = 0.30,
+    gate_knee: float = 1.20,
 ) -> torch.Tensor:
     """両手の左右間隔が膝の間隔に一致しているほど良い [0, 1]。
 
@@ -753,7 +794,10 @@ def hands_width_match(
     target = (knee_w * width_scale).clamp(min=min_width)
 
     err = hand_w - target
-    return torch.exp(-(err * err) / (std * std))
+    r = torch.exp(-(err * err) / (std * std))
+    if knee_gate_cfg is not None:
+        r = r * _knee_gate(env, knee_gate_cfg, gate_stand_knee, gate_knee)
+    return r
 
 # ---------------------------------------------------------------------------
 # 腕の伸展 (しゃがみ切った時に肘が曲がっていたら罰する)
@@ -849,8 +893,11 @@ def arm_forward_direction(
     std: float = 0.15,
     shoulder_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
     elbow_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    knee_gate_cfg: SceneEntityCfg | None = None,
+    gate_stand_knee: float = 0.30,
+    gate_knee: float = 1.20,
 ) -> torch.Tensor:
-    """上腕(肩->肘)がどれだけ前方を向いているか [0, 1]。
+    """上腕(肩->肘)がどれだけ前方を向いているか [0, 1]。膝ゲート付き。
 
     立ち位相では真下(0.0)、しゃがみ切りでは squat_forward を目標にする。
     左右それぞれで誤差を取ってから平均するので、片腕だけ前に出して
@@ -874,7 +921,10 @@ def arm_forward_direction(
     target = (stand_forward + (squat_forward - stand_forward) * depth).unsqueeze(-1)
     err_sq = ((fwd - target) ** 2).mean(dim=-1)
     idle = target.squeeze(-1) - stand_forward
-    return _relative_track(err_sq, idle * idle, std)
+    r = _relative_track(err_sq, idle * idle, std)
+    if knee_gate_cfg is not None:
+        r = r * _knee_gate(env, knee_gate_cfg, gate_stand_knee, gate_knee)
+    return r
 
 def torso_pitch_tracking(
     env: "ManagerBasedRLEnv",
@@ -901,6 +951,34 @@ def torso_pitch_tracking(
     err = robot.data.projected_gravity_b[:, 0] - target
     idle = target - torch.sin(torch.as_tensor(stand_pitch, device=depth.device))
     return _relative_track(err * err, idle * idle, std)
+
+
+def torso_backlean_penalty(
+    env: "ManagerBasedRLEnv",
+    margin: float = 0.10,
+    std: float = 0.15,
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """胴が後ろに反った分だけ罰する [-1, 0]。片側・位相非依存。
+
+    torso_pitch_tracking は _relative_track を通すので、反っても
+    「0 点になるだけ」でコストが無い (直立と同じ扱い)。深いしゃがみで
+    腕を前に出すと重心が前に移るため、方策はそれを上体を反らして
+    相殺しようとする。反り自体に明確なコストを置いて潰す。
+
+    projected_gravity_b の x 成分は前傾で正、後傾で負。
+    直立 (gx=0) と任意の前傾は無罰、margin (約 6 度) を超えて
+    後ろに反った分だけマイナス。
+
+    反り 11 度で -0.36、20 度で -0.94。
+
+    NOTE: これは骨盤基準なので「体全体が後ろに倒れる」動きを見る。
+          腰から上だけ反らす動きは waist_pitch_penalty が担当する。
+    """
+    robot: Articulation = env.scene[robot_cfg.name]
+    gx = robot.data.projected_gravity_b[:, 0]
+    deficit = (-margin - gx).clamp(min=0.0)
+    return torch.exp(-(deficit * deficit) / (std * std)) - 1.0
 
 # ---------------------------------------------------------------------------
 # しゃがみ切りでの腕の姿勢を強制する (大幅減点)
@@ -1058,8 +1136,14 @@ def arm_pose_tracking(
     shoulder_pitch_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
     elbow_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
     shoulder_yaw_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    knee_gate_cfg: SceneEntityCfg | None = None,
+    gate_stand_knee: float = 0.30,
+    gate_knee: float = 1.20,
 ) -> torch.Tensor:
     """腕の参照姿勢への追従度 [0, 1]。肩関節を直接動かす主報酬。
+
+    knee_gate_cfg を渡すと膝の曲がりで乗算ゲートがかかり、しゃがまずに
+    腕だけ伸ばして稼ぐ解を塞ぐ (落とし穴 13)。
 
     shoulder_pitch と elbow を位相の目標へ追従させ、shoulder_yaw を 0 に固定する。
     shoulder_roll はデフォルトが左右で符号反転 (+0.25 / -0.25) するためここでは
@@ -1086,7 +1170,10 @@ def arm_pose_tracking(
         (squat_shoulder_pitch - stand_shoulder_pitch) ** 2
         + (squat_elbow - stand_elbow) ** 2
     )
-    return _relative_track(err_sq, idle_sq, std)
+    r = _relative_track(err_sq, idle_sq, std)
+    if knee_gate_cfg is not None:
+        r = r * _knee_gate(env, knee_gate_cfg, gate_stand_knee, gate_knee)
+    return r
 
 def squat_depth_shortfall_penalty(
     env: "ManagerBasedRLEnv",
