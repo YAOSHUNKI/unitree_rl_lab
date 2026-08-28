@@ -877,7 +877,7 @@ def arm_forward_shortfall_penalty(
     env: "ManagerBasedRLEnv",
     period: float = 6.0,
     min_forward: float = 0.85,
-    std: float = 0.15,
+    std: float = 0.60,
     shoulder_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
     elbow_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
 ) -> torch.Tensor:
@@ -950,6 +950,30 @@ def waist_pitch_penalty(
     股関節から一本の剛体として扱っている)。
 
     NOTE: robot_cfg は waist_pitch_joint を含む SceneEntityCfg を params で渡すこと。
+    """
+    robot: Articulation = env.scene[robot_cfg.name]
+    q = robot.data.joint_pos[:, robot_cfg.joint_ids]
+    excess = (q.abs() - max_abs).clamp(min=0.0).mean(dim=-1)
+    return torch.exp(-(excess * excess) / (std * std)) - 1.0
+
+def wrist_neutral_penalty(
+    env: "ManagerBasedRLEnv",
+    max_abs: float = 0.15,
+    std: float = 0.25,
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """手首関節が中立から外れた分を罰する [-1, 0]。
+
+    hands_width_match / hands_symmetry_penalty / hands_knee_clearance_penalty は
+    いずれも「手先の位置」に依存する。手首は肩より腕の先端に近いので、
+    肩を回すより手首をひねる方が安価に位置を変えられる。
+    肩側の勾配が弱いと、方策は手首だけを異様にひねる解へ落ちる。
+
+    arm_extension_penalty では検出できない: G1 の wrist_roll/pitch/yaw は
+    肘先に密集しているため、いくらひねっても wrist_yaw_link の原点は
+    ほとんど動かず、3点の一直線度がほぼ変化しない。
+
+    max_abs はデフォルト姿勢の wrist_roll (±0.15) を無罰にする値。
     """
     robot: Articulation = env.scene[robot_cfg.name]
     q = robot.data.joint_pos[:, robot_cfg.joint_ids]

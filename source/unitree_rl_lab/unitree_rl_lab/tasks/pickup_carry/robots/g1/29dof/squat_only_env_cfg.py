@@ -105,6 +105,7 @@ KNEE_BODY_CFG   = SceneEntityCfg("robot", body_names=[".*_knee_link"])
 SHOULDER_CFG    = SceneEntityCfg("robot", body_names=[".*_shoulder_yaw_link"])
 ELBOW_CFG       = SceneEntityCfg("robot", body_names=[".*_elbow_link"])
 WAIST_PITCH_CFG = SceneEntityCfg("robot", joint_names=["waist_pitch_joint"])
+WRIST_CFG       = SceneEntityCfg("robot", joint_names=[".*_wrist_.*_joint"])
 FOOT_SENSOR_CFG = SceneEntityCfg("foot_contact", body_names=[FOOT_BODY_REGEX])
 
 _POSE_PARAMS = dict(
@@ -121,7 +122,7 @@ _POSE_PARAMS = dict(
 
 @configclass
 class PeriodicSquatRewardsCfg:
-    # ================= 正報酬: タスク達成 (最大 26.0) =================
+    # ================= 正報酬: タスク達成 (最大 25.0) =================
     # 姿勢追従は 2段構え。
     #   coarse(std 0.85): 目標から遠くても勾配が残る -> 学習初期の誘導
     #   fine  (std 0.35): 精度を出さないと入らない   -> 収束後の精度
@@ -151,10 +152,21 @@ class PeriodicSquatRewardsCfg:
         ),
     )
     # 腕を前方へ振る (肩関節を動かす動機。位置目標より勾配が素直)
-    arm_forward = RewTerm(
-        func=mdp.arm_forward_direction, weight=5.0,
+    # 2段構え。目標を 0.95 まで上げたことで、腕が真下のときの誤差が
+    # 0.95 に達し、狭い std だけでは勾配が完全に消える (1e-28 桁)。
+    # coarse が遠方からの誘導を、fine が精度を担当する。
+    arm_forward_coarse = RewTerm(
+        func=mdp.arm_forward_direction, weight=3.0,
         params=dict(
-            period=SQUAT_PERIOD, std=0.12,
+            period=SQUAT_PERIOD, std=0.60,
+            stand_forward=STAND_ARM_FWD, squat_forward=SQUAT_ARM_FWD,
+            shoulder_cfg=SHOULDER_CFG, elbow_cfg=ELBOW_CFG,
+        ),
+    )
+    arm_forward = RewTerm(
+        func=mdp.arm_forward_direction, weight=4.0,
+        params=dict(
+            period=SQUAT_PERIOD, std=0.15,
             stand_forward=STAND_ARM_FWD, squat_forward=SQUAT_ARM_FWD,
             shoulder_cfg=SHOULDER_CFG, elbow_cfg=ELBOW_CFG,
         ),
@@ -207,7 +219,7 @@ class PeriodicSquatRewardsCfg:
     arm_shortfall_pen = RewTerm(
         func=mdp.arm_forward_shortfall_penalty, weight=8.0,
         params=dict(
-            period=SQUAT_PERIOD, min_forward=ARM_FWD_MIN, std=0.15,
+            period=SQUAT_PERIOD, min_forward=ARM_FWD_MIN, std=0.60,
             shoulder_cfg=SHOULDER_CFG, elbow_cfg=ELBOW_CFG,
         ),
     )
@@ -262,10 +274,11 @@ class PeriodicSquatRewardsCfg:
     joint_acc    = RewTerm(func=mdp.joint_acc_l2,      weight=-2.5e-7)
     joint_torque = RewTerm(func=mdp.joint_torques_l2,  weight=-1.0e-6)
     dof_pos_lim  = RewTerm(func=mdp.joint_pos_limits,  weight=-1.0)
-    # 肩は前へ伸ばすので拘束しない。手首だけ暴れないよう弱く抑える。
-    wrist_default = RewTerm(
-        func=mdp.joint_deviation_l1, weight=-0.30,
-        params=dict(asset_cfg=SceneEntityCfg("robot", joint_names=[".*_wrist_.*"])),
+    # 手首を中立に固定。肩の勾配が弱いと方策は手首をひねって
+    # 手先位置の項を満たそうとするので、その逃げ道を塞ぐ。
+    wrist_pen = RewTerm(
+        func=mdp.wrist_neutral_penalty, weight=3.0,
+        params=dict(max_abs=0.15, std=0.25, robot_cfg=WRIST_CFG),
     )
     # 棒立ち   : 約 5.5 / 18.0
     # 正しいスクワット: 約 11.5 / 18.0
