@@ -68,6 +68,31 @@ def _squat_depth(env: "ManagerBasedRLEnv", period: float, phase_offset: float = 
     return 0.5 - 0.5 * torch.cos(2 * math.pi * phi)
 
 
+def _relative_track(
+    err_sq: torch.Tensor, idle_err_sq: torch.Tensor, std: float, floor: float = 0.25
+) -> torch.Tensor:
+    """アイドル基準を差し引いた追従報酬 [0, 1]。
+
+    exp(-err^2/std^2) をそのまま返すと「何もせず初期姿勢を保つ」だけで
+    大きな部分点が入る (棒立ちが満点の 3 割を稼ぐ)。
+    かといって std を詰めて潰すと 1 rad あたりの感度が跳ね上がり、
+    方策のわずかな変化で報酬が大きく揺れて PPO の KL が発散する
+    (落とし穴 12: 学習率が下限に張り付く)。
+
+    そこで std は物理的に追従可能な広さのまま、
+    「何もしなかった場合に得られる点」を基準として差し引く:
+
+        base = exp(-idle_err^2 / std^2)     何もしない robot の得点
+        r    = (raw - base) / (1 - base)    それを 0 に、満点を 1 に再スケール
+
+    勾配の増幅は 1/(1-base) で有界。floor で分母を下から抑えるので
+    depth ~ 0 (課題が自明な位相) で発散しない。
+    """
+    base = torch.exp(-idle_err_sq / (std * std))
+    raw = torch.exp(-err_sq / (std * std))
+    return ((raw - base) / (1.0 - base).clamp(min=floor)).clamp(min=0.0, max=1.0)
+
+
 def is_grasped(
     env: "ManagerBasedRLEnv",
     object_cfg: SceneEntityCfg,
@@ -371,7 +396,13 @@ def squat_pose_tracking(
     q_lat = robot.data.joint_pos[:, lateral_cfg.joint_ids]
     err_sq = err_sq + (q_lat ** 2).mean(dim=-1)
 
-    return torch.exp(-err_sq / (std * std))
+    # 「立ち姿勢のまま固まっていた場合」の誤差。これを 0 点の基準にする。
+    idle_sq = depth.squeeze(-1) ** 2 * (
+        (squat_hip_pitch - stand_hip_pitch) ** 2
+        + (squat_knee - stand_knee) ** 2
+        + (squat_ankle - stand_ankle) ** 2
+    )
+    return _relative_track(err_sq, idle_sq, std)
 
 
 def squat_height_tracking(
@@ -388,7 +419,8 @@ def squat_height_tracking(
     depth = _squat_depth(env, period, phase_offset)
     target = stand_height + (squat_height - stand_height) * depth
     err = robot.data.root_pos_w[:, 2] - target
-    return torch.exp(-(err * err) / (std * std))
+    idle_sq = depth ** 2 * (squat_height - stand_height) ** 2
+    return _relative_track(err * err, idle_sq, std)
 
 
 def feet_grounded(
@@ -633,7 +665,8 @@ def hip_abduction_tracking(
     # 片側のみ: 目標より閉じている分は罰しない (clamp(min=0))。
     # 両側にすると「脚を閉じた棒立ち」が減点され、開脚を促してしまう。
     excess = (abd - target).clamp(min=0.0)
-    return torch.exp(-(excess * excess) / (std * std)) - 1.0
+    # depth ゲート: 学習初期のふらつき (立ち位相) を罰しない。
+    return depth * (torch.exp(-(excess * excess) / (std * std)) - 1.0)
 
 
 def stance_width_penalty_phased(
@@ -663,7 +696,8 @@ def stance_width_penalty_phased(
 
     # 片側のみ: 目標より狭い分は罰しない。
     excess = (width - target).clamp(min=0.0)
-    return torch.exp(-(excess * excess) / (std * std)) - 1.0
+    # depth ゲート: 学習初期のふらつき (立ち位相) を罰しない。
+    return depth * (torch.exp(-(excess * excess) / (std * std)) - 1.0)
 
 # ---------------------------------------------------------------------------
 # 手を「膝の前」に「膝幅」で出す
@@ -839,7 +873,8 @@ def arm_forward_direction(
 
     target = (stand_forward + (squat_forward - stand_forward) * depth).unsqueeze(-1)
     err_sq = ((fwd - target) ** 2).mean(dim=-1)
-    return torch.exp(-err_sq / (std * std))
+    idle = target.squeeze(-1) - stand_forward
+    return _relative_track(err_sq, idle * idle, std)
 
 def torso_pitch_tracking(
     env: "ManagerBasedRLEnv",
@@ -864,7 +899,8 @@ def torso_pitch_tracking(
     target = torch.sin(torch.as_tensor(stand_pitch, device=depth.device)
                        + (squat_pitch - stand_pitch) * depth)
     err = robot.data.projected_gravity_b[:, 0] - target
-    return torch.exp(-(err * err) / (std * std))
+    idle = target - torch.sin(torch.as_tensor(stand_pitch, device=depth.device))
+    return _relative_track(err * err, idle * idle, std)
 
 # ---------------------------------------------------------------------------
 # しゃがみ切りでの腕の姿勢を強制する (大幅減点)
@@ -914,6 +950,7 @@ def arm_forward_shortfall_penalty(
 
 def hands_knee_clearance_penalty(
     env: "ManagerBasedRLEnv",
+    period: float = 6.0,
     min_distance: float = 0.18,
     std: float = 0.08,
     hand_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
@@ -935,7 +972,8 @@ def hands_knee_clearance_penalty(
     nearest = d.min(dim=-1).values                                    # 各手 -> 最寄りの膝
 
     deficit = (min_distance - nearest).clamp(min=0.0).mean(dim=-1)
-    return torch.exp(-(deficit * deficit) / (std * std)) - 1.0
+    depth = _squat_depth(env, period)
+    return depth * (torch.exp(-(deficit * deficit) / (std * std)) - 1.0)
 
 def waist_pitch_penalty(
     env: "ManagerBasedRLEnv",
@@ -966,6 +1004,7 @@ def waist_pitch_penalty(
 
 def wrist_neutral_penalty(
     env: "ManagerBasedRLEnv",
+    period: float = 6.0,
     max_abs: float = 0.15,
     std: float = 0.25,
     robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
@@ -986,7 +1025,8 @@ def wrist_neutral_penalty(
     robot: Articulation = env.scene[robot_cfg.name]
     q = robot.data.joint_pos[:, robot_cfg.joint_ids]
     excess = (q.abs() - max_abs).clamp(min=0.0).mean(dim=-1)
-    return torch.exp(-(excess * excess) / (std * std)) - 1.0
+    depth = _squat_depth(env, period)
+    return depth * (torch.exp(-(excess * excess) / (std * std)) - 1.0)
 
 # ---------------------------------------------------------------------------
 # 腕の関節空間トラッキング
@@ -1042,7 +1082,11 @@ def arm_pose_tracking(
     q_yaw = robot.data.joint_pos[:, shoulder_yaw_cfg.joint_ids]
     err_sq = err_sq + (q_yaw ** 2).mean(dim=-1)
 
-    return torch.exp(-err_sq / (std * std))
+    idle_sq = depth.squeeze(-1) ** 2 * (
+        (squat_shoulder_pitch - stand_shoulder_pitch) ** 2
+        + (squat_elbow - stand_elbow) ** 2
+    )
+    return _relative_track(err_sq, idle_sq, std)
 
 def squat_depth_shortfall_penalty(
     env: "ManagerBasedRLEnv",

@@ -156,7 +156,7 @@ class PeriodicSquatRewardsCfg:
     height_track = RewTerm(
         func=mdp.squat_height_tracking, weight=3.0,
         params=dict(
-            period=SQUAT_PERIOD, std=0.103,
+            period=SQUAT_PERIOD, std=0.16,
             stand_height=STAND_HEIGHT, squat_height=SQUAT_HEIGHT,
             robot_cfg=SceneEntityCfg("robot"),
         ),
@@ -165,7 +165,7 @@ class PeriodicSquatRewardsCfg:
     torso_pitch = RewTerm(
         func=mdp.torso_pitch_tracking, weight=3.0,
         params=dict(
-            period=SQUAT_PERIOD, std=0.15,
+            period=SQUAT_PERIOD, std=0.20,
             stand_pitch=TORSO_STAND_PITCH, squat_pitch=TORSO_SQUAT_PITCH,
             robot_cfg=SceneEntityCfg("robot"),
         ),
@@ -177,17 +177,17 @@ class PeriodicSquatRewardsCfg:
     # 肩・肘の関節目標を直接追従 (腕の主報酬)。coarse+fine の2段構え。
     arm_pose_coarse = RewTerm(
         func=mdp.arm_pose_tracking, weight=4.0,
-        params=dict(std=0.214, **_ARM_PARAMS),
+        params=dict(std=0.60, **_ARM_PARAMS),
     )
     arm_pose_fine = RewTerm(
         func=mdp.arm_pose_tracking, weight=6.0,
-        params=dict(std=0.088, **_ARM_PARAMS),
+        params=dict(std=0.25, **_ARM_PARAMS),
     )
     # world 座標での向きの確認 (関節目標だけでは胴の傾き次第で向きがずれる)
     arm_forward = RewTerm(
         func=mdp.arm_forward_direction, weight=3.0,
         params=dict(
-            period=SQUAT_PERIOD, std=0.15,
+            period=SQUAT_PERIOD, std=0.30,
             stand_forward=STAND_ARM_FWD, squat_forward=SQUAT_ARM_FWD,
             shoulder_cfg=SHOULDER_CFG, elbow_cfg=ELBOW_CFG,
         ),
@@ -203,42 +203,42 @@ class PeriodicSquatRewardsCfg:
     )
     # 合計を正に保つ床 (転倒判定は終了条件が担当するので小さく)
     upright = RewTerm(
-        func=mdp.upright_bonus, weight=0.5,
+        func=mdp.upright_bonus, weight=2.0,
         params=dict(robot_cfg=SceneEntityCfg("robot")),
     )
     grounded = RewTerm(
-        func=mdp.feet_grounded, weight=0.5,
+        func=mdp.feet_grounded, weight=2.0,
         params=dict(sensor_cfg=FOOT_SENSOR_CFG, force_threshold=1.0),
     )
 
     # ================= ペナルティ: 崩れるとマイナス (最小 -19.5) =================
     # すべて値域 [-1, 0]。静止・対称・正面向きなら 0 なので「タダ取り」できない。
     drift_pen = RewTerm(
-        func=mdp.drift_penalty, weight=1.5,
+        func=mdp.drift_penalty, weight=1.0,
         params=dict(std=0.25, robot_cfg=SceneEntityCfg("robot")),
     )
     slip_pen = RewTerm(
-        func=mdp.feet_slip_penalty, weight=1.5,
-        params=dict(std=0.15, force_threshold=1.0,
+        func=mdp.feet_slip_penalty, weight=1.0,
+        params=dict(std=0.30, force_threshold=1.0,
                     sensor_cfg=FOOT_SENSOR_CFG, asset_cfg=FEET_BODY_CFG),
     )
     # 手が左右非対称だとマイナス (中心が揃っているか。間隔は hands_width が担当)
     hands_sym_pen = RewTerm(
-        func=mdp.hands_symmetry_penalty, weight=1.0,
+        func=mdp.hands_symmetry_penalty, weight=0.5,
         params=dict(std=0.10, hand_cfg=HAND_BODY_CFG),
     )
     # しゃがみ切った時に肘が曲がっていたらマイナス (立ち位相では罰しない)
     arm_ext_pen = RewTerm(
-        func=mdp.arm_extension_penalty, weight=3.0,
+        func=mdp.arm_extension_penalty, weight=1.5,
         params=dict(
-            period=SQUAT_PERIOD, min_straightness=0.97, std=0.06,
+            period=SQUAT_PERIOD, min_straightness=0.97, std=0.10,
             shoulder_cfg=SHOULDER_CFG, elbow_cfg=ELBOW_CFG, hand_cfg=HAND_BODY_CFG,
         ),
     )
     # しゃがみ切りで腕が前方に出ていなければ大幅減点 (正報酬だけでは
     # 「取らなくても損しない」ため、必須要件はコスト側にも置く)
     arm_shortfall_pen = RewTerm(
-        func=mdp.arm_forward_shortfall_penalty, weight=10.0,
+        func=mdp.arm_forward_shortfall_penalty, weight=2.0,
         params=dict(
             period=SQUAT_PERIOD, min_forward=ARM_FWD_MIN, std=0.60,
             shoulder_cfg=SHOULDER_CFG, elbow_cfg=ELBOW_CFG,
@@ -246,7 +246,7 @@ class PeriodicSquatRewardsCfg:
     )
     # しゃがみが浅ければ大幅減点 (腕と同じく必須要件をコスト側にも置く)
     squat_shortfall_pen = RewTerm(
-        func=mdp.squat_depth_shortfall_penalty, weight=6.0,
+        func=mdp.squat_depth_shortfall_penalty, weight=1.5,
         params=dict(
             period=SQUAT_PERIOD, stand_knee=STAND_KNEE, squat_knee=SQUAT_KNEE,
             min_ratio=0.85, std=0.90, knee_cfg=KNEE_CFG,
@@ -254,34 +254,34 @@ class PeriodicSquatRewardsCfg:
     )
     # 手が膝にめり込んだらマイナス
     knee_clear_pen = RewTerm(
-        func=mdp.hands_knee_clearance_penalty, weight=4.0,
+        func=mdp.hands_knee_clearance_penalty, weight=2.0,
         params=dict(
-            min_distance=0.18, std=0.08,
+            period=SQUAT_PERIOD, min_distance=0.18, std=0.08,
             hand_cfg=HAND_BODY_CFG, knee_cfg=KNEE_BODY_CFG,
         ),
     )
     # 胴を反らせたらマイナス (骨盤基準の projected_gravity では検出できない)
     waist_pitch_pen = RewTerm(
-        func=mdp.waist_pitch_penalty, weight=4.0,
+        func=mdp.waist_pitch_penalty, weight=2.0,
         params=dict(max_abs=0.10, std=0.12, robot_cfg=WAIST_PITCH_CFG),
     )
     # 胴が左右に傾いたらマイナス (前傾ピッチは罰しない)
     torso_roll_pen = RewTerm(
         func=mdp.torso_roll_penalty, weight=1.0,
-        params=dict(std=0.15, robot_cfg=SceneEntityCfg("robot")),
+        params=dict(std=0.25, robot_cfg=SceneEntityCfg("robot")),
     )
     # 胴が正面からヨー方向にずれたらマイナス
     heading_pen = RewTerm(
-        func=mdp.heading_penalty, weight=1.0,
+        func=mdp.heading_penalty, weight=0.5,
         params=dict(robot_cfg=SceneEntityCfg("robot")),
     )
     speed_pen = RewTerm(
         func=mdp.base_speed_penalty, weight=0.5,
-        params=dict(std=0.30, robot_cfg=SceneEntityCfg("robot")),
+        params=dict(std=0.40, robot_cfg=SceneEntityCfg("robot")),
     )
     # --- 開脚抑制 (深いスクワットでは開脚が「安い抜け道」になるので強く) ---
     hip_abduction_pen = RewTerm(
-        func=mdp.hip_abduction_tracking, weight=6.0,
+        func=mdp.hip_abduction_tracking, weight=3.0,
         params=dict(
             period=SQUAT_PERIOD, std=0.12,
             stand_abduction=STAND_ABDUCTION, squat_abduction=SQUAT_ABDUCTION,
@@ -289,7 +289,7 @@ class PeriodicSquatRewardsCfg:
         ),
     )
     stance_pen = RewTerm(
-        func=mdp.stance_width_penalty_phased, weight=5.0,
+        func=mdp.stance_width_penalty_phased, weight=2.5,
         params=dict(
             period=SQUAT_PERIOD, std=0.08,
             stand_width=STAND_WIDTH, squat_width=SQUAT_WIDTH,
@@ -306,8 +306,8 @@ class PeriodicSquatRewardsCfg:
     # 手首を中立に固定。肩の勾配が弱いと方策は手首をひねって
     # 手先位置の項を満たそうとするので、その逃げ道を塞ぐ。
     wrist_pen = RewTerm(
-        func=mdp.wrist_neutral_penalty, weight=3.0,
-        params=dict(max_abs=0.15, std=0.25, robot_cfg=WRIST_CFG),
+        func=mdp.wrist_neutral_penalty, weight=1.5,
+        params=dict(period=SQUAT_PERIOD, max_abs=0.15, std=0.25, robot_cfg=WRIST_CFG),
     )
     # 棒立ち   : 約 5.5 / 18.0
     # 正しいスクワット: 約 11.5 / 18.0
