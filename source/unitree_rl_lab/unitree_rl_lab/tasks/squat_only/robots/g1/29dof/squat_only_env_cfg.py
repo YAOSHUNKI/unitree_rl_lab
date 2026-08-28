@@ -132,8 +132,10 @@ _POSE_PARAMS = dict(
 # 腕の正報酬を開ける「膝の曲がり」ゲート。
 # しゃがまずに腕だけ伸ばして稼ぐ局所解を塞ぐ (落とし穴 13)。
 GATE_KNEE = 1.20            # 目標 SQUAT_KNEE=2.20 の約半分で満開
+GATE_MIN  = 0.30            # 立っていても残す最低倍率 (落とし穴 15)
 _GATE_PARAMS = dict(
     knee_gate_cfg=KNEE_CFG, gate_stand_knee=STAND_KNEE, gate_knee=GATE_KNEE,
+    gate_min=GATE_MIN,
 )
 
 _ARM_PARAMS = dict(
@@ -247,9 +249,9 @@ class PeriodicSquatRewardsCfg:
     # しゃがみ切りで腕が前方に出ていなければ大幅減点 (正報酬だけでは
     # 「取らなくても損しない」ため、必須要件はコスト側にも置く)
     arm_shortfall_pen = RewTerm(
-        func=mdp.arm_forward_shortfall_penalty, weight=2.0,
+        func=mdp.arm_forward_shortfall_penalty, weight=4.0,
         params=dict(
-            period=SQUAT_PERIOD, min_forward=ARM_FWD_MIN, std=0.60,
+            period=SQUAT_PERIOD, min_forward=ARM_FWD_MIN, std=0.80,
             shoulder_cfg=SHOULDER_CFG, elbow_cfg=ELBOW_CFG,
         ),
     )

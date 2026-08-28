@@ -98,6 +98,7 @@ def _knee_gate(
     knee_cfg: SceneEntityCfg,
     stand_knee: float = 0.30,
     gate_knee: float = 1.20,
+    gate_min: float = 0.30,
 ) -> torch.Tensor:
     """膝がどれだけ曲がっているか [0, 1]。腕の報酬を開ける鍵。
 
@@ -107,10 +108,16 @@ def _knee_gate(
 
     位相ではなく実際の膝角で測るので「今この瞬間しゃがんでいるか」を見る。
     gate_knee (既定 1.20 rad = 目標 2.20 の約半分) で満開。
+
+    gate_min は「立っていても残す最低倍率」。完全に 0 にすると、脚が
+    出来上がるまでの数百 iteration の間、腕側に学習信号が一切入らず、
+    腕の方策が action_rate ペナルティに引かれて「動かない」に固まる
+    (落とし穴 15)。0.30 なら腕だけ解 (完璧の 27%) が脚を上回らない。
     """
     robot: Articulation = env.scene[knee_cfg.name]
     knee = robot.data.joint_pos[:, knee_cfg.joint_ids].mean(dim=-1)
-    return ((knee - stand_knee) / (gate_knee - stand_knee)).clamp(min=0.0, max=1.0)
+    prog = ((knee - stand_knee) / (gate_knee - stand_knee)).clamp(min=0.0, max=1.0)
+    return gate_min + (1.0 - gate_min) * prog
 
 
 def is_grasped(
@@ -778,6 +785,7 @@ def hands_width_match(
     knee_gate_cfg: SceneEntityCfg | None = None,
     gate_stand_knee: float = 0.30,
     gate_knee: float = 1.20,
+    gate_min: float = 0.30,
 ) -> torch.Tensor:
     """両手の左右間隔が膝の間隔に一致しているほど良い [0, 1]。
 
@@ -796,7 +804,7 @@ def hands_width_match(
     err = hand_w - target
     r = torch.exp(-(err * err) / (std * std))
     if knee_gate_cfg is not None:
-        r = r * _knee_gate(env, knee_gate_cfg, gate_stand_knee, gate_knee)
+        r = r * _knee_gate(env, knee_gate_cfg, gate_stand_knee, gate_knee, gate_min)
     return r
 
 # ---------------------------------------------------------------------------
@@ -896,6 +904,7 @@ def arm_forward_direction(
     knee_gate_cfg: SceneEntityCfg | None = None,
     gate_stand_knee: float = 0.30,
     gate_knee: float = 1.20,
+    gate_min: float = 0.30,
 ) -> torch.Tensor:
     """上腕(肩->肘)がどれだけ前方を向いているか [0, 1]。膝ゲート付き。
 
@@ -923,7 +932,7 @@ def arm_forward_direction(
     idle = target.squeeze(-1) - stand_forward
     r = _relative_track(err_sq, idle * idle, std)
     if knee_gate_cfg is not None:
-        r = r * _knee_gate(env, knee_gate_cfg, gate_stand_knee, gate_knee)
+        r = r * _knee_gate(env, knee_gate_cfg, gate_stand_knee, gate_knee, gate_min)
     return r
 
 def torso_pitch_tracking(
@@ -1139,6 +1148,7 @@ def arm_pose_tracking(
     knee_gate_cfg: SceneEntityCfg | None = None,
     gate_stand_knee: float = 0.30,
     gate_knee: float = 1.20,
+    gate_min: float = 0.30,
 ) -> torch.Tensor:
     """腕の参照姿勢への追従度 [0, 1]。肩関節を直接動かす主報酬。
 
@@ -1172,7 +1182,7 @@ def arm_pose_tracking(
     )
     r = _relative_track(err_sq, idle_sq, std)
     if knee_gate_cfg is not None:
-        r = r * _knee_gate(env, knee_gate_cfg, gate_stand_knee, gate_knee)
+        r = r * _knee_gate(env, knee_gate_cfg, gate_stand_knee, gate_knee, gate_min)
     return r
 
 def squat_depth_shortfall_penalty(
