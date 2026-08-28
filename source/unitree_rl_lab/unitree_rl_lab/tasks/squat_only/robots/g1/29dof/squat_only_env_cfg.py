@@ -186,11 +186,11 @@ class PeriodicSquatRewardsCfg:
     # coarse が遠方からの誘導を、fine が精度を担当する。
     # 肩・肘の関節目標を直接追従 (腕の主報酬)。coarse+fine の2段構え。
     arm_pose_coarse = RewTerm(
-        func=mdp.arm_pose_tracking, weight=4.0,
+        func=mdp.arm_pose_tracking, weight=5.0,
         params=dict(std=0.60, **_ARM_PARAMS),
     )
     arm_pose_fine = RewTerm(
-        func=mdp.arm_pose_tracking, weight=6.0,
+        func=mdp.arm_pose_tracking, weight=8.0,
         params=dict(std=0.25, **_ARM_PARAMS),
     )
     # world 座標での向きの確認 (関節目標だけでは胴の傾き次第で向きがずれる)
@@ -265,7 +265,7 @@ class PeriodicSquatRewardsCfg:
     )
     # 手が膝にめり込んだらマイナス
     knee_clear_pen = RewTerm(
-        func=mdp.hands_knee_clearance_penalty, weight=2.0,
+        func=mdp.hands_knee_clearance_penalty, weight=4.0,
         params=dict(
             period=SQUAT_PERIOD, min_distance=0.18, std=0.08,
             hand_cfg=HAND_BODY_CFG, knee_cfg=KNEE_BODY_CFG,

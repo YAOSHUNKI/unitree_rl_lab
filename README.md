@@ -300,9 +300,7 @@ python scripts/rsl_rl/play.py --task Unitree-G1-29dof-PeriodicSquat --checkpoint
 ### restart train
 
 ```bash
-python scripts/rsl_rl/train.py --task Unitree-G1-29dof-PeriodicSquat \
---resume True --load_run <run_dir_name> --checkpoint model_1500.pt \
---max_iterations 3000
+python scripts/rsl_rl/train.py --task Unitree-G1-29dof-PeriodicSquat --num_envs 4096 --resume --load_run 2026-08-28_16-32-07 --checkpoint model_800.pt
 ```
 
 ---
