@@ -36,3 +36,10 @@ class G1PickupCarryPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         desired_kl=0.01,
         max_grad_norm=1.0,
     )
+
+
+@configclass
+class G1PeriodicSquatPPORunnerCfg(G1PickupCarryPPORunnerCfg):
+    """PeriodicSquat 専用のログ出力設定。"""
+
+    experiment_name = "squat_only"

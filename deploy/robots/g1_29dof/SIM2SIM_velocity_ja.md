@@ -152,7 +152,7 @@ v1 の deploy.yaml の観測名を `keyboard_velocity_commands` → `velocity_co
 
 ---
 
-## 参考:squat / pickup_carry を sim2sim する場合
+## 参考:squat / squat_only を sim2sim する場合
 velocity と違い観測に box / hand / squat_phase 等のカスタム項(計118次元)を含みます。
 公式 C++ ルートでは (1) `play.py` で export、(2) `observations.h` に対応する C++ 観測関数を追加、
 (3) MuJoCo シーンに box を追加、が必要です。まず velocity で経路を確立してから着手するのがおすすめです。

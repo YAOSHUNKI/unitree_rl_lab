@@ -1044,3 +1044,30 @@ def arm_pose_tracking(
 
     return torch.exp(-err_sq / (std * std))
 
+def squat_depth_shortfall_penalty(
+    env: "ManagerBasedRLEnv",
+    period: float = 6.0,
+    stand_knee: float = 0.30,
+    squat_knee: float = 2.20,
+    min_ratio: float = 0.85,
+    std: float = 0.90,
+    knee_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """しゃがみが深さ相応まで到達していない分を罰する [-1, 0]。
+
+    arm_forward_shortfall_penalty の脚版。正報酬 (squat_pose_tracking) だけだと
+    「取らなくても損はしない」ため、棒立ちが低得点ではあっても許容範囲に留まる。
+    必須要件はコスト側にも置く。
+
+    閾値は深さに比例させる (min_ratio は許容する取りこぼし)。片側なので
+    目標より深く曲げる分は罰しない。深さゲート付きなので立ち位相は 0。
+    """
+    robot: Articulation = env.scene[knee_cfg.name]
+    depth = _squat_depth(env, period)
+
+    target = stand_knee + (squat_knee - stand_knee) * depth * min_ratio
+    knee = robot.data.joint_pos[:, knee_cfg.joint_ids].mean(dim=-1)
+
+    deficit = (target - knee).clamp(min=0.0)
+    return depth * (torch.exp(-(deficit * deficit) / (std * std)) - 1.0)
+

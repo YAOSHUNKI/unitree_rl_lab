@@ -29,7 +29,7 @@ from isaaclab.terrains import TerrainImporterCfg
 from isaaclab.utils import configclass
 from isaaclab.utils.noise import AdditiveUniformNoiseCfg as Unoise
 
-import unitree_rl_lab.tasks.pickup_carry.mdp as mdp
+import unitree_rl_lab.tasks.squat_only.mdp as mdp
 from unitree_rl_lab.assets.robots.unitree import UNITREE_G1_29DOF_CFG
 
 

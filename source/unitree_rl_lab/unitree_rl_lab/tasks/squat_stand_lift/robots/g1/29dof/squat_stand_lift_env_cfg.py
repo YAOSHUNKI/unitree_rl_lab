@@ -6,7 +6,7 @@
   - 掴んだまま立ち上がる (骨盤 0.73 m)
   - その間ずっとその場から動かない
 
-設計方針 (PeriodicSquat + pickup_carry の融合):
+設計方針 (PeriodicSquat + squat_only の融合):
   - PeriodicSquat の姿勢追従群を period=6.0 s / phase_offset=0.5 で半周期だけ使い、
     しゃがみ (phi=0.5) -> 立ち (phi=1.0) の単調な追従にする。
   - episode_length_s = T_task = 3.0 s で切ることで戻り位相 (立ち->しゃがみ) に
@@ -34,7 +34,7 @@ from isaaclab.managers import SceneEntityCfg
 from isaaclab.managers import TerminationTermCfg as DoneTerm
 from isaaclab.utils import configclass
 
-import unitree_rl_lab.tasks.pickup_carry.mdp as mdp
+import unitree_rl_lab.tasks.squat_only.mdp as mdp
 
 # NOTE: フォルダ名が数字で始まる (29dof) ため通常の import では読めない。
 # 実体クラスは entry_point 文字列経由で読まれるので、この env_cfg の
@@ -42,7 +42,7 @@ import unitree_rl_lab.tasks.pickup_carry.mdp as mdp
 import importlib
 import math
 _pickup = importlib.import_module(
-    "unitree_rl_lab.tasks.pickup_carry.robots.g1.29dof.pickup_carry_env_cfg"
+    "unitree_rl_lab.tasks.squat_only.robots.g1.29dof.pickup_carry_env_cfg"
 )
 G1PickupCarryEnvCfg = _pickup.G1PickupCarryEnvCfg
 FOOT_BODY_REGEX = _pickup.FOOT_BODY_REGEX
@@ -146,7 +146,7 @@ class SquatStandLiftRewardsCfg:
         params=dict(sensor_cfg=FOOT_SENSOR_CFG, force_threshold=1.0),
     )
 
-    # ================= 箱関連 (pickup_carry から流用) ========================
+    # ================= 箱関連 (squat_only から流用) ========================
     # NOTE: 元関数はゲートを持たないので、しゃがみ位相でも部分点が入る。
     # これで問題があれば SquatStandLift 専用のゲート付きラッパを作る。
     # まずは弱めの重みで生の値を投入して挙動を観察する。

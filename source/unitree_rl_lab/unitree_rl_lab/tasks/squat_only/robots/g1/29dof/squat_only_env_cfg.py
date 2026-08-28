@@ -27,7 +27,7 @@ from isaaclab.managers import SceneEntityCfg
 from isaaclab.managers import TerminationTermCfg as DoneTerm
 from isaaclab.utils import configclass
 
-import unitree_rl_lab.tasks.pickup_carry.mdp as mdp
+import unitree_rl_lab.tasks.squat_only.mdp as mdp
 from .pickup_carry_env_cfg import (
     G1PickupCarryEnvCfg,
     FOOT_BODY_REGEX,
@@ -156,7 +156,7 @@ class PeriodicSquatRewardsCfg:
     height_track = RewTerm(
         func=mdp.squat_height_tracking, weight=3.0,
         params=dict(
-            period=SQUAT_PERIOD, std=0.15,
+            period=SQUAT_PERIOD, std=0.103,
             stand_height=STAND_HEIGHT, squat_height=SQUAT_HEIGHT,
             robot_cfg=SceneEntityCfg("robot"),
         ),
@@ -177,11 +177,11 @@ class PeriodicSquatRewardsCfg:
     # 肩・肘の関節目標を直接追従 (腕の主報酬)。coarse+fine の2段構え。
     arm_pose_coarse = RewTerm(
         func=mdp.arm_pose_tracking, weight=4.0,
-        params=dict(std=0.70, **_ARM_PARAMS),
+        params=dict(std=0.214, **_ARM_PARAMS),
     )
     arm_pose_fine = RewTerm(
         func=mdp.arm_pose_tracking, weight=6.0,
-        params=dict(std=0.25, **_ARM_PARAMS),
+        params=dict(std=0.088, **_ARM_PARAMS),
     )
     # world 座標での向きの確認 (関節目標だけでは胴の傾き次第で向きがずれる)
     arm_forward = RewTerm(
@@ -195,7 +195,7 @@ class PeriodicSquatRewardsCfg:
     # 両手の間隔を「膝幅」に合わせる
     # (これが無いと hands_sym_pen だけでは両手が中央で重なっても満点になる)
     hands_width = RewTerm(
-        func=mdp.hands_width_match, weight=2.0,
+        func=mdp.hands_width_match, weight=1.0,
         params=dict(
             width_scale=HAND_WIDTH_SCALE, min_width=HAND_WIDTH_MIN, std=0.06,
             hand_cfg=HAND_BODY_CFG, knee_cfg=KNEE_BODY_CFG,
@@ -238,10 +238,18 @@ class PeriodicSquatRewardsCfg:
     # しゃがみ切りで腕が前方に出ていなければ大幅減点 (正報酬だけでは
     # 「取らなくても損しない」ため、必須要件はコスト側にも置く)
     arm_shortfall_pen = RewTerm(
-        func=mdp.arm_forward_shortfall_penalty, weight=8.0,
+        func=mdp.arm_forward_shortfall_penalty, weight=10.0,
         params=dict(
             period=SQUAT_PERIOD, min_forward=ARM_FWD_MIN, std=0.60,
             shoulder_cfg=SHOULDER_CFG, elbow_cfg=ELBOW_CFG,
+        ),
+    )
+    # しゃがみが浅ければ大幅減点 (腕と同じく必須要件をコスト側にも置く)
+    squat_shortfall_pen = RewTerm(
+        func=mdp.squat_depth_shortfall_penalty, weight=6.0,
+        params=dict(
+            period=SQUAT_PERIOD, stand_knee=STAND_KNEE, squat_knee=SQUAT_KNEE,
+            min_ratio=0.85, std=0.90, knee_cfg=KNEE_CFG,
         ),
     )
     # 手が膝にめり込んだらマイナス

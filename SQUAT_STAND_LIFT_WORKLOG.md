@@ -7,7 +7,7 @@ Unitree G1 29DOF に「腰を下ろした状態から箱を掴んで立ち上が
 - タスクフォルダ: `source/unitree_rl_lab/unitree_rl_lab/tasks/squat_stand_lift/`
 - 学習ログ: `logs/rsl_rl/g1_squat_stand_lift/`
 - 基盤: `G1PickupCarryEnvCfg` を継承 (箱・センサ・観測を流用)
-- **フォルダ方針: 案 A** — 新タスクだけ独立、mdp/agents は `pickup_carry` を参照
+- **フォルダ方針: 案 A** — 新タスクだけ独立、mdp/agents は `squat_only` を参照
 
 ---
 
@@ -16,8 +16,8 @@ Unitree G1 29DOF に「腰を下ろした状態から箱を掴んで立ち上が
 | # | 内容 | 状態 |
 |---|---|---|
 | 0 | `tasks/squat_stand_lift/` フォルダを scaffold | **DONE** |
-| 1 | `pickup_carry/mdp/rewards.py` の `_squat_phase` / `_squat_depth` / 全 8 報酬関数に `phase_offset` 追加 | **DONE** |
-| 2 | `pickup_carry/mdp/observations.py` の `squat_phase_obs` に `phase_offset` 追加 | **DONE** |
+| 1 | `squat_only/mdp/rewards.py` の `_squat_phase` / `_squat_depth` / 全 8 報酬関数に `phase_offset` 追加 | **DONE** |
+| 2 | `squat_only/mdp/observations.py` の `squat_phase_obs` に `phase_offset` 追加 | **DONE** |
 | 3 | SQUAT 底の腕関節角 (shoulder_pitch, elbow) を実測 | TODO (暫定値で先行) |
 | 4 | `squat_stand_lift_env_cfg.py` を新規作成 | **DONE (暫定 spawn 値)** |
 | 5 | `tasks/squat_stand_lift/robots/g1/29dof/__init__.py` に gym.register 追加 | **DONE** |
@@ -33,7 +33,7 @@ Unitree G1 29DOF に「腰を下ろした状態から箱を掴んで立ち上が
 
 ```
 tasks/
-├── pickup_carry/                       ← 既存 + mdp に phase_offset 追加のみ
+├── squat_only/                       ← 既存 + mdp に phase_offset 追加のみ
 │   ├── mdp/
 │   │   ├── rewards.py                  ← _squat_phase / _squat_depth / 8 関数に phase_offset
 │   │   ├── rewards.py.pre_phaseoffset  ← 変更前バックアップ
@@ -46,13 +46,13 @@ tasks/
 └── squat_stand_lift/                   ← 新規 (scaffold は元々複製されていたが再構築)
     ├── __init__.py                     ← タスク説明の docstring のみ
     ├── mdp/                            ← re-export シム
-    │   ├── __init__.py                 ← from unitree_rl_lab.tasks.pickup_carry.mdp import *
+    │   ├── __init__.py                 ← from unitree_rl_lab.tasks.squat_only.mdp import *
     │   ├── events.py                   ← placeholder (import されない)
     │   ├── observations.py             ← placeholder
     │   └── rewards.py                  ← placeholder
     ├── agents/
     │   ├── __init__.py                 ← 空
-    │   └── rsl_rl_ppo_cfg.py           ← pickup_carry の G1PickupCarryPPORunnerCfg を re-export
+    │   └── rsl_rl_ppo_cfg.py           ← squat_only の G1PickupCarryPPORunnerCfg を re-export
     ├── robots/
     │   ├── __init__.py, g1/__init__.py ← 空 (パッケージ化)
     │   └── g1/29dof/
@@ -71,7 +71,7 @@ tasks/
 ## 全体方針 (再掲)
 
 `PeriodicSquat` の姿勢追従群を **半周期だけ** 使ってしゃがみ→立ちの単調追従に転用し、
-`pickup_carry` にある箱把持・持ち上げ報酬を後半フェーズにゲート付きで足す。
+`squat_only` にある箱把持・持ち上げ報酬を後半フェーズにゲート付きで足す。
 周期関数は破壊せず、位相オフセット 1 引数だけ追加する。
 
 ### 設計原則 (`g1-squat-reward-reference.md` より)
@@ -85,7 +85,7 @@ tasks/
 
 ## 実装済みの変更点
 
-### 修正 1 : `pickup_carry/mdp/rewards.py`
+### 修正 1 : `squat_only/mdp/rewards.py`
 
 - `_squat_phase(env, period, phase_offset: float = 0.0)`
   返り値: `((env.episode_length_buf * env.step_dt) % period) / period + phase_offset) % 1.0`
@@ -103,7 +103,7 @@ tasks/
 
 デフォルト 0.0 なので `PeriodicSquat` の既存呼び出しは無変更で動く (**後方互換**)。
 
-### 修正 2 : `pickup_carry/mdp/observations.py`
+### 修正 2 : `squat_only/mdp/observations.py`
 
 - `squat_phase_obs(env, period=3.0, phase_offset: float = 0.0)`
 
@@ -126,7 +126,7 @@ elbow          = 1.00  ← 暫定
 - 姿勢追従群 (`pose_coarse`, `pose_fine`, `height_track`, `torso_pitch`,
   `hip_abduction_pen`, `stance_pen`): `phase_offset=0.5` で PeriodicSquat から流用
 - 箱系 (`hands_near`, `hands_touch`, `grasp`, `lift`, `stand_up`, `drop_pen`):
-  pickup_carry から流用 (現状ゲートなし; 挙動を見て後で追加)
+  squat_only から流用 (現状ゲートなし; 挙動を見て後で追加)
 - 定位置保持 (`drift_pen`, `slip_pen`, `heading_pen`, `speed_pen`)
 - 姿勢ペナルティ (`waist_pitch_pen`, `torso_roll_pen`, `wrist_pen`)
 - 正則化 (`ang_vel_xy`, `action_rate`, `joint_acc`, `joint_torque`, `dof_pos_lim`)
@@ -145,7 +145,7 @@ elbow          = 1.00  ← 暫定
 `Unitree-G1-29dof-SquatStandLift` と `-Play` を gym.register。
 env_cfg entry_point は
 `unitree_rl_lab.tasks.squat_stand_lift.robots.g1.29dof.squat_stand_lift_env_cfg:G1SquatStandLiftEnvCfg`。
-`rsl_rl_cfg_entry_point` は `pickup_carry` の `G1PickupCarryPPORunnerCfg` を流用。
+`rsl_rl_cfg_entry_point` は `squat_only` の `G1PickupCarryPPORunnerCfg` を流用。
 
 ### 修正 5 : import chain 対策 (importlib)
 
@@ -220,8 +220,8 @@ python scripts/rsl_rl/train.py \
 
 - 2026-08-28 初版作成。修正 1-6 の設計を確定。腕関節角の実測がブロッキング。
 - 2026-08-28 フォルダ構成を案 A に確定。`tasks/squat_stand_lift/` を新規、
-  mdp/agents は `pickup_carry` を参照する形に。タスク一覧を再編。
+  mdp/agents は `squat_only` を参照する形に。タスク一覧を再編。
 - 2026-08-28 **実装完了**: mdp の phase_offset 追加、squat_stand_lift フォルダの
-  scaffold 再構築 (元は pickup_carry の duplicate だったので shim 化)、
+  scaffold 再構築 (元は squat_only の duplicate だったので shim 化)、
   env_cfg / gym.register 作成。腕 spawn は暫定値。全 Python ファイルの
   構文チェック通過。次は `list_envs.py` での列挙確認。

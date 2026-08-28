@@ -6,7 +6,7 @@ Standalone task package: place this whole folder under
 and it will be picked up automatically by the ``import_packages`` call in
 ``tasks/__init__.py``.
 
-You can freely rename the top-level folder (e.g. ``pickup_carry``,
+You can freely rename the top-level folder (e.g. ``squat_only``,
 ``whole_body``, ``box_task``, ...). Nothing outside this folder needs to
 change.
 """

@@ -1,20 +1,21 @@
-# pickup_carry — G1 スクワット学習
+# squat_only — G1 スクワット学習
 
 Unitree G1 29DOF に「その場で周期的にスクワットしながら両手を前へ伸ばす」動作を
 Isaac Lab + rsl_rl で学習させるタスク。最終的には床の箱を拾って運ぶ動作へ繋げる。
 
 | | |
 |---|---|
-| 実装 | `mdp/rewards.py` (1030 行 / 44 関数) |
-| 設定 | `robots/g1/29dof/squat_only_env_cfg.py` (342 行) |
+| 実装 | `mdp/rewards.py` (1073 行 / 49 関数 = 公開 42 + 内部ヘルパー 7) |
+| 設定 | `robots/g1/29dof/squat_only_env_cfg.py` (371 行) |
 | 周期 | 6.0 秒 (3 秒で沈み、3 秒で立つ) |
-| 配点 | 正報酬 最大 34.0 / ペナルティ 最小 −39.5 |
+| 配点 | 正報酬 最大 33.0 / ペナルティ 最小 −47.5 |
+| 棒立ちの得点 | 1 step 4.38 / 完璧 31.31（比 7.2 倍） |
 
 ---
 
 ## ⚠ このドキュメントの保守ルール
 
-**このファイル（`tasks/pickup_carry/README.md`）がこのタスクの唯一の正典。**
+**このファイル（`tasks/squat_only/README.md`）がこのタスクの唯一の正典。**
 コピーを別の場所に作らず、常にここを直接編集する。
 
 **報酬関数・定数・環境設定を変更したら、同じ作業の中で必ずここも更新する。**
@@ -40,6 +41,7 @@ Isaac Lab + rsl_rl で学習させるタスク。最終的には床の箱を拾�
 | `Unitree-G1-29dof-PeriodicSquat-Play` | 同・可視化用（16 env） |
 | `Unitree-G1-29dof-PickupCarry` | 箱の pick & carry（7 フェーズ・未着手） |
 | `Unitree-G1-29dof-PickupCarry-Play` | 同・可視化用 |
+| `Unitree-G1-29dof-SquatStandLift` | しゃがみ→箱把持→立ち上がりの単発動作（別パッケージ `squat_stand_lift/`） |
 
 ```bash
 # 学習
@@ -59,23 +61,45 @@ python scripts/rsl_rl/play.py --task Unitree-G1-29dof-PeriodicSquat-Play --num_e
 
 ## ファイル構成
 
-`source/unitree_rl_lab/unitree_rl_lab/tasks/pickup_carry/` 以下。
+`source/unitree_rl_lab/unitree_rl_lab/tasks/squat_only/` 以下。
 
 | ファイル | 行数 | 状態 | 内容 |
 |---|---:|---|---|
 | `README.md` | — | 追加 | このドキュメント |
-| `mdp/rewards.py` | 1030 | 追加 | 全報酬関数（44） |
+| `mdp/rewards.py` | 1073 | 追加 | 全報酬関数（49） |
 | `mdp/rewards.py.bak` | 1140 | 一時 | 未使用関数削除前のバックアップ。不要なら削除可 |
 | `mdp/observations.py` | 101 | 追加 | 箱の相対位置、手の位置、位相観測 |
 | `mdp/events.py` | 55 | 追加 | 箱のリセット |
 | `mdp/__init__.py` | 15 | 追加 | Isaac Lab / locomotion の mdp を再エクスポート |
-| `robots/g1/29dof/squat_only_env_cfg.py` | 342 | 追加 | **周期スクワットの環境設定（主戦場）** |
+| `robots/g1/29dof/squat_only_env_cfg.py` | 371 | 追加 | **周期スクワットの環境設定（主戦場）** |
 | `robots/g1/29dof/pickup_carry_env_cfg.py` | 340 | 追加 | 箱タスクの環境設定 |
 | `robots/g1/29dof/__init__.py` | 48 | 追加 | gym 登録（4 タスク） |
 | `agents/rsl_rl_ppo_cfg.py` | 38 | 追加 | PPO 設定 |
 
 `mdp/__init__.py` が `from .rewards import *` しているので、`rewards.py` に関数を
 足すだけで `mdp.xxx` として参照できる。
+
+### このパッケージは共有 MDP ライブラリでもある
+
+`tasks/squat_stand_lift/` が `mdp` と `agents` をここから re-export して使っている。
+
+```python
+# squat_stand_lift/mdp/__init__.py
+from unitree_rl_lab.tasks.squat_only.mdp import *
+```
+
+**`rewards.py` の関数を削除・改名するときは `squat_stand_lift/` 側の参照も確認する。**
+
+### 名前について
+
+パッケージ名は 08-28 に `pickup_carry` → `squat_only` へ変更した。
+次の 3 つは意図的に旧名のまま残している。
+
+| 対象 | 旧名を維持する理由 |
+|---|---|
+| `pickup_carry_env_cfg.py` | 箱タスクの設定ファイルであり、名前が実態と一致している |
+| `G1PickupCarryEnvCfg` / `G1PickupCarryPPORunnerCfg` | 同上。クラス名の変更は影響範囲が広い |
+| `experiment_name = "g1_pickup_carry"` | ログ出力先 `logs/rsl_rl/g1_pickup_carry/`。変えると既存の run から resume できなくなる |
 
 ---
 
@@ -213,26 +237,27 @@ target = stand_value + (squat_value - stand_value) * depth
 
 ## 配点（squat_only_env_cfg.py の PeriodicSquatRewardsCfg）
 
-### 正報酬 — タスク達成（最大 34.0）
+### 正報酬 — タスク達成（最大 33.0）
 
 | cfg 名 | 関数 | weight | σ | 役割 |
 |---|---|---:|---|---|
 | `pose_coarse` | `squat_pose_tracking` | 4.0 | 0.85 | 脚の参照姿勢へ粗く誘導 |
 | `pose_fine` | `squat_pose_tracking` | 8.0 | 0.35 | 同じ姿勢を高精度で要求 |
-| `height_track` | `squat_height_tracking` | 3.0 | 0.15 | 骨盤高さの追従 |
+| `height_track` | `squat_height_tracking` | 3.0 | 0.103 | 骨盤高さの追従 |
 | `torso_pitch` | `torso_pitch_tracking` | 3.0 | 0.15 | 胴の前傾 = 重心の前後位置 |
-| `arm_pose_coarse` | `arm_pose_tracking` | 4.0 | 0.70 | 肩・肘の関節目標へ粗く誘導 |
-| `arm_pose_fine` | `arm_pose_tracking` | 6.0 | 0.25 | 同・精度 |
+| `arm_pose_coarse` | `arm_pose_tracking` | 4.0 | 0.214 | 肩・肘の関節目標へ粗く誘導 |
+| `arm_pose_fine` | `arm_pose_tracking` | 6.0 | 0.088 | 同・精度 |
 | `arm_forward` | `arm_forward_direction` | 3.0 | 0.15 | world 座標での向きの確認 |
-| `hands_width` | `hands_width_match` | 2.0 | 0.06 | 両手の間隔を膝幅に |
+| `hands_width` | `hands_width_match` | 1.0 | 0.06 | 両手の間隔を膝幅に |
 | `upright` | `upright_bonus` | 0.5 | — | 合計を正に保つ床 |
 | `grounded` | `feet_grounded` | 0.5 | — | 同上 |
 
-### ペナルティ — 崩れた分だけマイナス（最小 −39.5）
+### ペナルティ — 崩れた分だけマイナス（最小 −47.5）
 
 | cfg 名 | 関数 | weight | σ | 役割 |
 |---|---|---:|---|---|
-| `arm_shortfall_pen` | `arm_forward_shortfall_penalty` | 8.0 | 0.60 | 腕が前に出ていない |
+| `arm_shortfall_pen` | `arm_forward_shortfall_penalty` | 10.0 | 0.60 | 腕が前に出ていない |
+| `squat_shortfall_pen` | `squat_depth_shortfall_penalty` | 6.0 | 0.90 | しゃがみが浅い |
 | `hip_abduction_pen` | `hip_abduction_tracking` | 6.0 | 0.12 | 開脚（hip_roll） |
 | `stance_pen` | `stance_width_penalty_phased` | 5.0 | 0.08 | 足幅の広がり |
 | `knee_clear_pen` | `hands_knee_clearance_penalty` | 4.0 | 0.08 | 手が膝にめり込む |
@@ -284,6 +309,23 @@ reward = exp(-err / std^2)
 **1 項にまとめる理由**: 関節ごとに別々の報酬を置くと互いに矛盾する解が生まれる。
 1 本の参照姿勢なら「膝を曲げる」「腰を落とす」「脚をひねらない」が同時に
 成立する組み合わせしか高得点にならない。σ を変えて 2 回登録している（原則 5）。
+
+#### `squat_depth_shortfall_penalty` → [-1,0]
+
+膝が深さ相応の `min_ratio`（0.85）倍まで曲がっていない分を罰する。深さゲート付き。
+
+```
+target  = stand_knee + (squat_knee - stand_knee) * depth * min_ratio
+deficit = clamp(target - mean(knee), min=0)
+return  depth * (exp(-deficit^2 / std^2) - 1)
+```
+
+`arm_forward_shortfall_penalty` と同じ思想。正報酬だけだと「立ったままでも
+損はしない」ので、**必須要件はコスト側にも置く**。これを入れる前は棒立ちが
+1 step あたり 10.87 点（1 エピソード 130 点）を稼いでいた。
+
+閾値を深さに比例させるのが必須。定数にすると沈み込み途中で正しく追従していても
+減点され続ける（`arm_forward_shortfall_penalty` と同じ罠）。
 
 #### `squat_height_tracking` → [0,1]
 
@@ -544,6 +586,29 @@ rsl_rl の adaptive スケジューラは KL が目標を超え続けると学�
 **対策**: 500 iteration 以内に `Loss/learning_rate` を確認する。下限に張り付いて
 いたらそのまま回しても改善しないので停止して報酬を見直す。
 
+### 11. σ は絶対値ではなく「可動範囲との比」で決める
+
+同じ `exp(-err^2/std^2)` でも、量ごとに可動範囲が違うので σ を揃えてはいけない。
+σ が可動範囲より広いと、**何もしなくても満点近くが入る**。
+
+実測（1 周期での誤差二乗和の最大値と、σ に対する比）:
+
+| 項 | Σerr²(最大) | 旧 σ | Σerr²/σ² | 棒立ちの得点率 |
+|---|---:|---:|---:|---:|
+| 脚 coarse | 7.913 | 0.85 | 11.0 | 34% |
+| 脚 fine | 7.913 | 0.35 | 64.6 | 21% |
+| 腕 coarse | 0.501 | 0.70 | **1.0** | **73%** |
+| 腕 fine | 0.501 | 0.25 | **8.0** | **37%** |
+| 高さ | 0.1156 | 0.15 | **5.1** | **42%** |
+
+腕は「腕を一切動かさなくても σ の内側」だった。脚と同じ比になるよう逆算して
+腕 coarse 0.214 / fine 0.088、高さ 0.103 に修正した。
+
+**手順**: 新しい追従項を足したら、`Σ(目標の振れ幅)²` を計算し、
+`Σerr²/σ²` が既存項と同じオーダーになる σ を選ぶ。
+
+---
+
 ---
 
 ## 学習時に見る指標
@@ -563,6 +628,7 @@ rsl_rl の adaptive スケジューラは KL が目標を超え続けると学�
 | `pose_fine` | 上昇し続ける | 頭打ち → 参照姿勢が不安定 |
 | `torso_pitch` | 2.4 以上 / 3.0 | 低い → 前傾できず重心が後ろのまま |
 | `arm_shortfall_pen` | -0.5 以上 | -3.0 以下 → 腕が前に出ていない |
+| `squat_shortfall_pen` | -0.5 以上 | -2.0 以下 → しゃがみが浅い（棒立ちで -2.31） |
 | `arm_forward_coarse` | 上昇 | 横ばい → 肩が物理的に動かせない |
 | `wrist_pen` | -0.3 以上 | -2.0 以下 → 手首をひねって逃げている |
 | `waist_pitch_pen` | -0.3 以上 | -2.0 以下 → 上体を反らせている |
@@ -578,6 +644,8 @@ rsl_rl の adaptive スケジューラは KL が目標を超え続けると学�
 
 | 日付 | 変更 | 理由 |
 |---|---|---|
+| 08-28 | σ を可動範囲比で再設定（腕 coarse 0.70→0.214 / 腕 fine 0.25→0.088 / 高さ 0.15→0.103）。`squat_depth_shortfall_penalty`（6.0）を追加。`arm_shortfall_pen` 8.0→10.0、`hands_width` 2.0→1.0 | 棒立ちが 1 step 10.87 点（1 エピソード 130 点）で完璧の 34% を稼いでいた。σ が腕の可動範囲より広く「動かさなくても満点近く」だったのが主因（落とし穴 11）。修正後 棒立ち 4.38 / 完璧 31.31（比 1.8 倍 → 7.2 倍）|
+| 08-28 | パッケージ名を `tasks/pickup_carry/` → `tasks/squat_only/` にリネーム。参照 17 ファイルを書き換え | 中身が箱タスクではなく共有 MDP ライブラリ + スクワットタスクになっており、名前が実態と合っていなかった。gym ID・クラス名・`experiment_name` は互換のため維持 |
 | 08-27 | `arm_pose_tracking` 追加（coarse 4.0 + fine 6.0）。肩 `shoulder_pitch` 0.20→-0.45、肘 `elbow` 0.97→1.25 を関節空間で直接指定。`arm_forward` は 4.0→3.0 に降格 | 幾何ベースだけでは肩への勾配が間接的だった。MuJoCo モデルから符号規約と零点を実測し、推測を排除 |
 | 08-27 | `arm_forward` を coarse(σ0.60) + fine(σ0.15) に分割。`arm_shortfall_pen` の σ を 0.15 → 0.60 | 目標 0.95 に対し σ が狭く、腕が真下のとき勾配が 10⁻²⁷ 桁で消えていた（落とし穴 8） |
 | 08-27 | `wrist_neutral_penalty` 追加（3.0）。旧 `wrist_default` を置換 | 肩の勾配が無い間、方策が手首だけをひねって手先位置の項を満たしていた |

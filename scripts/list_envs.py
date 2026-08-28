@@ -62,7 +62,7 @@ def import_packages():
         "locomotion.robots",
         "mimic.robots",
         "manipulation.robots",
-        "pickup_carry.robots",
+        "squat_only.robots",
         "squat_stand_lift.robots",
     ]:
         package = importlib.import_module(package)
