@@ -1,18 +1,82 @@
-# pickup_carry — 報酬関数リファレンス
+# pickup_carry — G1 スクワット学習
 
 Unitree G1 29DOF に「その場で周期的にスクワットしながら両手を前へ伸ばす」動作を
-学習させるための報酬関数群。
+Isaac Lab + rsl_rl で学習させるタスク。最終的には床の箱を拾って運ぶ動作へ繋げる。
 
-- 実装: `mdp/rewards.py`
-- 設定: `robots/g1/29dof/squat_only_env_cfg.py`
-- タスク ID: `Unitree-G1-29dof-PeriodicSquat`
-- 周期: 6.0 秒 / 正報酬 最大 26.0 / ペナルティ 最小 -20.5
+| | |
+|---|---|
+| 実装 | `mdp/rewards.py` (982 行 / 43 関数) |
+| 設定 | `robots/g1/29dof/squat_only_env_cfg.py` (342 行) |
+| 周期 | 6.0 秒 (3 秒で沈み、3 秒で立つ) |
+| 配点 | 正報酬 最大 25.0 / ペナルティ 最小 −36.5 |
+
+---
+
+## ⚠ このドキュメントの保守ルール
+
+**報酬関数・定数・設定を変更したら、必ずこの README も同じ変更で更新する。**
+
+更新する場所は次の 3 つ。
+
+1. 該当する章（配点表 / 関数リファレンス / 定数表）
+2. 末尾の **変更履歴** に 1 行追加（日付・変更内容・理由）
+3. 新しい失敗パターンを踏んだら **落とし穴** に追加
+
+コードと README がずれると、過去に潰したはずの失敗を再度踏む。実際にこのタスクでは
+同じ種類のバグ（勾配消失）を脚と腕で 2 回踏んでいる。
+
+---
+
+## タスク一覧
+
+| gym ID | 用途 |
+|---|---|
+| `Unitree-G1-29dof-PeriodicSquat` | 周期スクワット学習（現在の主タスク） |
+| `Unitree-G1-29dof-PeriodicSquat-Play` | 同・可視化用（16 env） |
+| `Unitree-G1-29dof-PickupCarry` | 箱の pick & carry（7 フェーズ・未着手） |
+| `Unitree-G1-29dof-PickupCarry-Play` | 同・可視化用 |
+
+```bash
+# 学習
+python scripts/rsl_rl/train.py --task Unitree-G1-29dof-PeriodicSquat \
+  --num_envs 4096 --headless
+
+# 続きから
+python scripts/rsl_rl/train.py --task Unitree-G1-29dof-PeriodicSquat \
+  --num_envs 4096 --headless \
+  agent.resume=true agent.load_run=<run名>
+
+# 可視化
+python scripts/rsl_rl/play.py --task Unitree-G1-29dof-PeriodicSquat-Play --num_envs 16
+```
+
+---
+
+## ファイル構成
+
+`source/unitree_rl_lab/unitree_rl_lab/tasks/pickup_carry/` 以下。
+
+| ファイル | 行数 | 状態 | 内容 |
+|---|---:|---|---|
+| `README.md` | — | 追加 | このドキュメント |
+| `mdp/rewards.py` | 982 | 追加 | 全報酬関数（43） |
+| `mdp/rewards.py.bak` | 1140 | 一時 | 未使用関数削除前のバックアップ。不要なら削除可 |
+| `mdp/observations.py` | 101 | 追加 | 箱の相対位置、手の位置、位相観測 |
+| `mdp/events.py` | 55 | 追加 | 箱のリセット |
+| `mdp/__init__.py` | 15 | 追加 | Isaac Lab / locomotion の mdp を再エクスポート |
+| `robots/g1/29dof/squat_only_env_cfg.py` | 342 | 追加 | **周期スクワットの環境設定（主戦場）** |
+| `robots/g1/29dof/pickup_carry_env_cfg.py` | 340 | 追加 | 箱タスクの環境設定 |
+| `robots/g1/29dof/__init__.py` | 48 | 追加 | gym 登録（4 タスク） |
+| `agents/rsl_rl_ppo_cfg.py` | 38 | 追加 | PPO 設定 |
+
+`mdp/__init__.py` が `from .rewards import *` しているので、`rewards.py` に関数を
+足すだけで `mdp.xxx` として参照できる。
 
 ---
 
 ## 設計原則
 
-失敗から得た 4 つ。個々の関数より優先度が高い。新しい項を足すときは必ず照合する。
+失敗から得た 5 つ。個々の関数より優先度が高い。新しい項を足すときは必ず照合する。
 
 ### 1. 正報酬はタスク達成のみ。「何もしない」で稼げる項を作らない
 
@@ -43,6 +107,15 @@ Unitree G1 29DOF に「その場で周期的にスクワットしながら両手
 > 足首背屈の soft 限界が 0.803 rad なので、踵接地のまま股関節を足の上に
 > 保てるのは `knee <= 1.61` まで。それより深い姿勢は前傾で重心を戻す必要がある。
 
+### 5. 目標を遠くしたら σ も広げる（coarse + fine）
+
+ガウシアン報酬は誤差が σ の数倍を超えると値が指数的に潰れ、**勾配が消える**。
+目標値を大きくしたときに σ を据え置くと、方策は「どちらへ動けばよいか」を
+知る手段を失う。σ を変えた 2 項（粗い誘導 + 精度）に分けるのが定石。
+
+> 実測: 腕の目標を 0.55 → 0.95 に上げた際、σ=0.12 のままだったため
+> fwd 0.00 と 0.05 の報酬差が 10⁻²⁷ 桁になり、肩が一切動かなくなった。
+
 ---
 
 ## 位相と深さ
@@ -61,45 +134,88 @@ target = stand_value + (squat_value - stand_value) * depth
 
 ---
 
-## 現行の配点
+## 参照姿勢の定数
 
-### 正報酬 — タスク達成 (最大 26.0)
+`squat_only_env_cfg.py` 冒頭。運動学で重心を検算した上で決めている（原則 4）。
 
-| cfg 名 | 関数 | weight | 値域 | 役割 |
+| 定数 | 立ち | 完全しゃがみ | soft 限界 | 備考 |
+|---|---:|---:|---|---|
+| `HIP_PITCH` | -0.10 | -2.10 | -2.26 | 余裕 0.16 |
+| `KNEE` | 0.30 | 2.20 | 2.73 | 126 度 |
+| `ANKLE` | -0.20 | -0.75 | -0.803 | 余裕 0.053 |
+| `HEIGHT` | 0.73 | 0.39 | — | 骨盤高 [m] |
+| `TORSO_PITCH` | 0.00 | 0.65 | — | 前傾 37 度 |
+| `ARM_FWD` | 0.00 | 0.95 | — | 上腕の前方成分（鉛直から 72 度） |
+| `ARM_FWD_MIN` | — | 0.85 | — | 下回ると大幅減点 |
+| `ABDUCTION` | 0.00 | 0.18 | — | \|hip_roll\| 許容量 |
+| `WIDTH` | 0.20 | 0.28 | — | 足の左右間隔 [m] |
+| `HAND_WIDTH_SCALE` | — | 1.0 | — | 手の間隔 = 膝幅 × これ |
+
+この姿勢の重心（運動学モデルによる推定）:
+
+| 項目 | 値 | 判定 |
+|---|---:|---|
+| COM_x | +0.046 m | 足首より前 |
+| 踵からの余裕 | 0.106 m | 後方転倒への余裕 |
+| つま先までの余裕 | 0.104 m | 前方転倒への余裕（ほぼ均衡） |
+
+> **寸法は推定値**: 大腿・下腿 0.30 m、胴 0.32 m、腕 0.36 m は G1 の公称身長から
+> 較正したもの。`knee = 2*|ankle|` の関係は比率で決まるので寸法誤差に強いが、
+> 骨盤高 0.39 m などの絶対値には数 cm の誤差があり得る。
+
+---
+
+## 配点（squat_only_env_cfg.py の PeriodicSquatRewardsCfg）
+
+### 正報酬 — タスク達成（最大 25.0）
+
+| cfg 名 | 関数 | weight | σ | 役割 |
 |---|---|---:|---|---|
-| `pose_coarse` | `squat_pose_tracking` | 4.0 | [0,1] σ=0.85 | 脚の参照姿勢へ粗く誘導 |
-| `pose_fine` | `squat_pose_tracking` | 8.0 | [0,1] σ=0.35 | 同じ姿勢を高精度で要求 |
-| `height_track` | `squat_height_tracking` | 3.0 | [0,1] | 骨盤高さの追従 |
-| `torso_pitch` | `torso_pitch_tracking` | 3.0 | [0,1] | 胴の前傾 = 重心の前後位置 |
-| `arm_forward` | `arm_forward_direction` | 5.0 | [0,1] | 上腕を前方へ振る |
-| `hands_width` | `hands_width_match` | 2.0 | [0,1] | 両手の間隔を膝幅に |
-| `upright` | `upright_bonus` | 0.5 | [0,1] | 合計を正に保つ床 |
-| `grounded` | `feet_grounded` | 0.5 | [0,1] | 同上 |
+| `pose_coarse` | `squat_pose_tracking` | 4.0 | 0.85 | 脚の参照姿勢へ粗く誘導 |
+| `pose_fine` | `squat_pose_tracking` | 8.0 | 0.35 | 同じ姿勢を高精度で要求 |
+| `height_track` | `squat_height_tracking` | 3.0 | 0.15 | 骨盤高さの追従 |
+| `torso_pitch` | `torso_pitch_tracking` | 3.0 | 0.15 | 胴の前傾 = 重心の前後位置 |
+| `arm_forward_coarse` | `arm_forward_direction` | 3.0 | 0.60 | 上腕を前方へ粗く誘導 |
+| `arm_forward` | `arm_forward_direction` | 4.0 | 0.15 | 同・精度 |
+| `hands_width` | `hands_width_match` | 2.0 | 0.06 | 両手の間隔を膝幅に |
+| `upright` | `upright_bonus` | 0.5 | — | 合計を正に保つ床 |
+| `grounded` | `feet_grounded` | 0.5 | — | 同上 |
 
-### ペナルティ — 崩れた分だけマイナス (最小 -20.5)
+### ペナルティ — 崩れた分だけマイナス（最小 −36.5）
 
-| cfg 名 | 関数 | weight | 値域 | 役割 |
+| cfg 名 | 関数 | weight | σ | 役割 |
 |---|---|---:|---|---|
-| `hip_abduction_pen` | `hip_abduction_tracking` | 6.0 | [-1,0] 片側 | 開脚 (hip_roll) |
-| `stance_pen` | `stance_width_penalty_phased` | 5.0 | [-1,0] 片側 | 足幅の広がり |
-| `arm_ext_pen` | `arm_extension_penalty` | 3.0 | [-1,0] 片側 | 肘の曲がり |
-| `drift_pen` | `drift_penalty` | 1.5 | [-1,0] | 水平ドリフト |
-| `slip_pen` | `feet_slip_penalty` | 1.5 | [-1,0] | 足の滑り |
-| `hands_sym_pen` | `hands_symmetry_penalty` | 1.0 | [-1,0] | 手の左右非対称 |
-| `torso_roll_pen` | `torso_roll_penalty` | 1.0 | [-1,0] | 胴の左右傾き |
-| `heading_pen` | `heading_penalty` | 1.0 | [-1,0] | ヨー方向のずれ |
-| `speed_pen` | `base_speed_penalty` | 0.5 | [-1,0] | 水平速度 |
+| `arm_shortfall_pen` | `arm_forward_shortfall_penalty` | 8.0 | 0.60 | 腕が前に出ていない |
+| `hip_abduction_pen` | `hip_abduction_tracking` | 6.0 | 0.12 | 開脚（hip_roll） |
+| `stance_pen` | `stance_width_penalty_phased` | 5.0 | 0.08 | 足幅の広がり |
+| `knee_clear_pen` | `hands_knee_clearance_penalty` | 4.0 | 0.08 | 手が膝にめり込む |
+| `waist_pitch_pen` | `waist_pitch_penalty` | 4.0 | 0.12 | 胴の反り |
+| `arm_ext_pen` | `arm_extension_penalty` | 3.0 | 0.06 | 肘の曲がり |
+| `wrist_pen` | `wrist_neutral_penalty` | 3.0 | 0.25 | 手首のひねり |
+| `drift_pen` | `drift_penalty` | 1.5 | 0.25 | 水平ドリフト |
+| `slip_pen` | `feet_slip_penalty` | 1.5 | 0.15 | 足の滑り |
+| `hands_sym_pen` | `hands_symmetry_penalty` | 1.0 | 0.10 | 手の左右非対称 |
+| `torso_roll_pen` | `torso_roll_penalty` | 1.0 | 0.15 | 胴の左右傾き |
+| `heading_pen` | `heading_penalty` | 1.0 | — | ヨー方向のずれ |
+| `speed_pen` | `base_speed_penalty` | 0.5 | 0.30 | 水平速度 |
 
 ### 正則化
 
 | cfg 名 | 関数 | weight | 備考 |
 |---|---|---:|---|
 | `dof_pos_lim` | `joint_pos_limits` | -1.0 | 参照姿勢が関節限界に食い込むと発火。異常検知に有用 |
-| `wrist_default` | `joint_deviation_l1` | -0.30 | 手首のみ。肩は前へ伸ばすので対象外 |
 | `ang_vel_xy` | `ang_vel_xy_l2` | -0.02 | |
 | `action_rate` | `action_rate_l2` | -0.005 | |
 | `joint_torque` | `joint_torques_l2` | -1.0e-6 | |
 | `joint_acc` | `joint_acc_l2` | -2.5e-7 | |
+
+### 終了条件
+
+| cfg 名 | 関数 | 設定 | 意図 |
+|---|---|---|---|
+| `fell_over` | `bad_orientation` | limit_angle=1.2 | 約 69 度傾いたら終了 |
+| `collapsed` | `root_height_below_minimum` | 0.20 m | 骨盤が沈み込んだら終了 |
+| `base_contact` | — | None（無効化） | 深いしゃがみでの偶発的な骨盤接触を許す |
 
 ---
 
@@ -107,9 +223,9 @@ target = stand_value + (squat_value - stand_value) * depth
 
 ### 姿勢追従
 
-#### `squat_pose_tracking` -> [0,1]
+#### `squat_pose_tracking` → [0,1]
 
-hip_pitch / knee / ankle_pitch の 3 グループを位相に応じた目標へ追従させ、
+hip_pitch / knee / ankle_pitch の 3 グループを位相の目標へ追従させ、
 lateral グループ (hip_yaw, waist_yaw, waist_roll) を 0 に固定する。
 
 ```
@@ -120,17 +236,13 @@ reward = exp(-err / std^2)
 
 **1 項にまとめる理由**: 関節ごとに別々の報酬を置くと互いに矛盾する解が生まれる。
 1 本の参照姿勢なら「膝を曲げる」「腰を落とす」「脚をひねらない」が同時に
-成立する組み合わせしか高得点にならない。
+成立する組み合わせしか高得点にならない。σ を変えて 2 回登録している（原則 5）。
 
-**σ を変えて 2 回登録している** (coarse 0.85 / fine 0.35)。目標が深くなると
-追従失敗時の誤差が大きくなり、単一の狭い σ では底で勾配が消える。粗い方が
-遠方からの誘導を、細かい方が精度を担当する。棒立ちとの識別比が 2.5 → 3.5 倍に改善。
-
-#### `squat_height_tracking` -> [0,1]
+#### `squat_height_tracking` → [0,1]
 
 骨盤の高さを位相の目標に追従させる。関節角だけ合っていて体が浮く・傾く解を潰す。
 
-#### `torso_pitch_tracking` -> [0,1]
+#### `torso_pitch_tracking` → [0,1]
 
 `projected_gravity_b[:, 0] = sin(前傾角)` を目標に追従させる。深いスクワットでは
 前傾しないと重心が踵より後ろに抜けて後方転倒する。
@@ -138,26 +250,42 @@ reward = exp(-err / std^2)
 脚の関節追従でも前傾は間接的に決まるが、あれは個々の関節誤差の和なので前傾角
 そのものがずれても部分点が入る。重心の前後位置を直接支配する量なので独立させている。
 
+#### `waist_pitch_penalty` → [-1,0]
+
+`waist_pitch_joint` が中立（±0.10 rad）から外れた分を罰する。
+
+**なぜ必要か**: `torso_pitch_tracking` / `upright_bonus` / `torso_roll_penalty` は
+いずれも `projected_gravity_b` を読むが、これは**骨盤（root）基準**。腰から上を
+反らせても骨盤が垂直なら検出できない。腕を前に出すと重心が前へ動くので、
+その対価として上体を反らせてバランスを取る解が生まれ、これが無料だった。
+
 ### 腕
 
 腕の姿勢は「向き・伸展・間隔」の 3 つで完全に決まる。いずれもスケールフリーなので、
-腕の長さや肩の高さを知る必要がない。手の絶対位置を別途指定すると腕長の推定値に
-依存し、互いに引っ張り合う。
+腕の長さや肩の高さを知る必要がない。**手先の絶対位置は一切与えていない。**
 
-#### `arm_forward_direction` -> [0,1]
+#### `arm_forward_direction` → [0,1]
 
-**上腕** (肩 -> 肘) の単位ベクトルの前方 x 成分を位相の目標に追従させる。
-0 = 真下、0.55 = 鉛直から 33 度前、1.0 = 水平前方。
+**上腕**（肩 → 肘）の単位ベクトルの前方 x 成分を位相の目標に追従させる。
+0 = 真下、0.95 = 鉛直から 72 度前、1.0 = 水平前方。
 
-当初は「肩 -> 手」で測っていたが、それだと**肘を曲げるだけで前方成分を稼げてしまい**、
+当初は「肩 → 手」で測っていたが、それだと**肘を曲げるだけで前方成分を稼げてしまい**、
 肩を回さずに満点が取れた。上腕で測れば肩関節を回す以外に達成手段がない。
 
 位置目標ではなく向きにしている理由: 向きは必ず到達可能で、全域で単調な勾配が出る。
 位置目標は腕の長さの外にあると勾配が薄くなり、腕を垂らしたままでも部分点が入る。
 
-#### `arm_extension_penalty` -> [-1,0]
+#### `arm_forward_shortfall_penalty` → [-1,0]
 
-肩・肘・手の 3 点の幾何で腕の伸び具合を測る。深さでゲートしているので立ち位相では 0。
+しゃがみ切りで上腕が `min_forward`（0.85）まで前に出ていない分を罰する。
+正報酬だけだと「取らなくても損はしない」ため、必須要件はコスト側にも置く。
+
+閾値は深さに比例させている。定数のままだと沈み込み途中で正しく追従していても
+「足りない」と判定され、目標達成時でも減点が残る。
+
+#### `arm_extension_penalty` → [-1,0]
+
+肩・肘・手の 3 点の幾何で腕の伸び具合を測る。深さゲート付き。
 
 ```
 straightness = ||肩->手|| / (||肩->肘|| + ||肘->手||)
@@ -172,35 +300,54 @@ straightness = ||肩->手|| / (||肩->肘|| + ||肘->手||)
 0 が「真っ直ぐ」かどうか USD を見ないと判断できない。幾何ならリンク長も
 符号規約も知らずに済む。
 
-#### `hands_width_match` -> [0,1]
+**限界**: G1 の `wrist_roll/pitch/yaw` は肘先に密集しているため、手首をいくら
+ひねっても `wrist_yaw_link` の原点はほとんど動かず、この指標では検出できない。
+手首は `wrist_neutral_penalty` が担当する。
 
-両手の左右間隔を、実測した膝の間隔 (× width_scale、下限 min_width) に一致させる。
+#### `wrist_neutral_penalty` → [-1,0]
+
+手首関節が中立（±0.15 rad、デフォルトの `wrist_roll` を無罰にする値）から
+外れた分を罰する。
+
+**なぜ必要か**: `hands_width_match` / `hands_symmetry_penalty` /
+`hands_knee_clearance_penalty` は手先の位置に依存する。手首は肩より腕の先端に
+近いので、肩を回すより手首をひねる方が安価に位置を変えられる。肩側の勾配が
+弱いと、方策は手首だけを異様にひねる解へ落ちる。
+
+#### `hands_width_match` → [0,1]
+
+両手の左右間隔を、実測した膝の間隔（× `width_scale`、下限 `min_width`）に一致させる。
 
 これが無いと両手が中央で重なる。`hands_symmetry_penalty` は「左右対称」しか
 要求しないので、**両手が y=0 で重なっていても満点**になってしまう。
 
-#### `hands_symmetry_penalty` -> [-1,0]
+#### `hands_symmetry_penalty` → [-1,0]
 
-骨盤ヨー座標系で、前後 x は左右一致・左右 y は符号反転 (和が 0)・上下 z は左右一致。
+骨盤ヨー座標系で、前後 x は左右一致・左右 y は符号反転（和が 0）・上下 z は左右一致。
 すべて差の二乗で見るので `find_bodies` が返す左右の並び順に依存しない。
+
+#### `hands_knee_clearance_penalty` → [-1,0]
+
+手が膝から `min_distance`（0.18 m）以内に入った分を罰する。各手について
+両膝との距離の最小値を取るので、body_ids の左右の並び順に依存しない。
 
 ### 開脚抑制
 
 深いスクワットは narrow stance では踏ん張りにくいため、開脚が「安い抜け道」になる。
-両方とも**片側ペナルティ** (閉じている分は罰しない) なので、重みを上げても
+両方とも**片側ペナルティ**（閉じている分は罰しない）なので、重みを上げても
 正しい姿勢のコストは 0。
 
-#### `hip_abduction_tracking` -> [-1,0]
+#### `hip_abduction_tracking` → [-1,0]
 
-`|hip_roll|` の平均が「深さ相応の許容量」を**超えた分だけ**罰する。
-立ち位相では 0、完全しゃがみでは 0.18 rad (約 10 度) まで許容。
+`|hip_roll|` の平均が深さ相応の許容量を**超えた分だけ**罰する。
+立ち位相では 0、完全しゃがみでは 0.18 rad（約 10 度）まで許容。
 
 完全に 0 を要求するのは非現実的 — 大腿が水平近くまで来る深さでは、人間でも
 胴を入れるスペースのために脚をやや開く。
 
-#### `stance_width_penalty_phased` -> [-1,0]
+#### `stance_width_penalty_phased` → [-1,0]
 
-足の左右間隔が深さ相応の許容幅 (0.20 -> 0.28 m) を超えた分だけ罰する。
+足の左右間隔が深さ相応の許容幅（0.20 → 0.28 m）を超えた分だけ罰する。
 
 ### 定位置保持
 
@@ -208,14 +355,12 @@ straightness = ||肩->手|| / (||肩->肘|| + ||肘->手||)
 
 | 関数 | 内容 |
 |---|---|
-| `drift_penalty` | スポーン位置 (`env.scene.env_origins`) からの水平距離。25cm で -0.63、50cm で -0.98 |
-| `feet_slip_penalty` | **接地している足だけ**の水平速度。遊脚は見ないので踏み替え自体は妨げない |
-| `heading_penalty` | 初期ヨー向きからのずれ。`cos(yaw) = 2w^2 - 1` を使い、ラップアラウンド問題を回避 |
+| `drift_penalty` | スポーン位置（`env.scene.env_origins`）からの水平距離 |
+| `feet_slip_penalty` | **接地している足だけ**の水平速度。遊脚は見ないので踏み替えは妨げない |
+| `heading_penalty` | 初期ヨー向きからのずれ。`cos(yaw) = 2w^2 - 1` でラップアラウンド回避 |
 | `base_speed_penalty` | 胴体の水平速度。上下 (z) は見ないので沈み込み・立ち上がりを阻害しない |
 
 ### 転倒対策
-
-正報酬側は「合計を正に保つ床」として小さく置くだけ。実際の抑止は終了条件が担当する。
 
 | 関数 | 内容 |
 |---|---|
@@ -223,53 +368,27 @@ straightness = ||肩->手|| / (||肩->肘|| + ||肘->手||)
 | `feet_grounded` | 接地している足の割合。正報酬なので跳ねる解を潰す |
 | `torso_roll_penalty` | `projected_gravity_b[:, 1]` のみ。**前傾を一切罰さずにロールだけ潰す** |
 
-終了条件:
-
-| cfg 名 | 関数 | 設定 | 意図 |
-|---|---|---|---|
-| `fell_over` | `bad_orientation` | limit_angle=1.2 | 約 69 度傾いたら終了 |
-| `collapsed` | `root_height_below_minimum` | 0.20 m | 骨盤が沈み込んだら終了 |
-| `base_contact` | — | None (無効化) | 深いしゃがみでの偶発的な骨盤接触を許す |
-
 ### 内部ヘルパー
 
 | 関数 | 戻り値 | 役割 |
 |---|---|---|
 | `_squat_phase` | (N,) | [0,1) の周期位相 |
-| `_squat_depth` | (N,) | [0,1] のしゃがみ深さ (余弦) |
+| `_squat_depth` | (N,) | [0,1] のしゃがみ深さ（余弦） |
 | `_bodies_in_yaw_frame` | (N,K,3) | 骨盤原点・ヨーのみ揃えた座標系。「前」が胴の前傾によらず水平前方を指す |
-| `_sorted_by_lateral` | (N,2,3) | y 座標で並べ替え、左右の対応付けを保証。肩・肘・手を別々の正規表現で引くと `find_bodies` の順序が一致する保証がないため必要 |
+| `_sorted_by_lateral` | (N,2,3) | y 座標で並べ替え、左右の対応付けを保証 |
 
----
+### 箱タスク専用（`pickup_carry_env_cfg.py` から参照・削除禁止）
 
-## 参照姿勢の定数
-
-`squat_only_env_cfg.py` 冒頭。運動学で重心を検算した上で決めている (原則 4)。
-
-| 定数 | 立ち | 完全しゃがみ | soft 限界 | 備考 |
-|---|---:|---:|---|---|
-| `HIP_PITCH` | -0.10 | -2.10 | -2.26 | 余裕 0.16 |
-| `KNEE` | 0.30 | 2.20 | 2.73 | 126 度 |
-| `ANKLE` | -0.20 | -0.75 | -0.803 | 余裕 0.053 |
-| `HEIGHT` | 0.73 | 0.39 | — | 骨盤高 [m] |
-| `TORSO_PITCH` | 0.00 | 0.65 | — | 前傾 37 度 |
-| `ARM_FWD` | 0.00 | 0.55 | — | 上腕の前方成分 |
-| `ABDUCTION` | 0.00 | 0.18 | — | \|hip_roll\| 許容量 |
-| `WIDTH` | 0.20 | 0.28 | — | 足の左右間隔 [m] |
-
-この姿勢の重心:
-
-| 項目 | 値 | 判定 |
-|---|---:|---|
-| COM_x | +0.046 m | 足首より前 |
-| 踵からの余裕 | 0.106 m | 後方転倒への余裕 |
-| つま先までの余裕 | 0.104 m | 前方転倒への余裕 (ほぼ均衡) |
-| 手から箱まで | 0.146 m | 箱を中心 (0.35, 0.10) と仮定 |
-
-> **寸法は推定値**: 運動学の計算に使った大腿・下腿 0.30 m、胴 0.32 m、腕 0.36 m は
-> G1 の公称身長から較正したもの。`knee = 2*|ankle|` という関係自体は比率で決まるので
-> 寸法誤差に強いが、骨盤高 0.39 m などの絶対値には数 cm の誤差があり得る。
-> `height_track` が 2.0/3.0 を超えない場合は実測が必要。
+| 関数 | フェーズ |
+|---|---|
+| `approach_box` / `face_box` | 1-2 箱へ接近し正対する |
+| `squat_when_near_box` / `knee_flexion_when_squatting` | 3 箱の近くでしゃがむ |
+| `hands_near_box` / `hands_contact_box` | 4 両手を箱へ |
+| `is_grasped` / `grasp_bonus` | 5 掴む |
+| `lift_box` / `stand_up_when_lifting` | 6 持ち上げて立つ |
+| `carry_box_velocity` | 7 運ぶ |
+| `drop_box_penalty` / `box_collision_penalty` | 安全 |
+| `hip_abduction_penalty` / `feet_lateral_distance_penalty` / `leg_symmetry_penalty` | 開脚抑制（旧版） |
 
 ---
 
@@ -312,16 +431,17 @@ SceneEntityCfg だけ**を `resolve(scene)` する。関数のデフォルト引
 ### 5. グループ平均は追加した関節でシグナルが薄まる
 
 `squat_pose_tracking` の lateral 項はグループ内の平均。「胴を正面に向ける」対応で
-waist を 2 関節追加したところ、hip_roll の誤差寄与が 0.125 -> 0.083 に**33% 薄まった**。
+waist を 2 関節追加したところ、hip_roll の誤差寄与が 0.125 → 0.083 に**33% 薄まった**。
 
 **対策**: 抑止力を効かせたい関節はグループに混ぜず、専用項として切り出す。
 
 ### 6. 端点の位置で測ると途中の関節で達成される
 
-`arm_forward_direction` を「肩 -> 手」で測っていたため、**肩を回さず肘を曲げるだけで
-前方成分を稼げた**。arm_ext_pen (3.0) より arm_forward (5.0) が強く、折れ曲がる方が得。
+`arm_forward_direction` を「肩 → 手」で測っていたため、**肩を回さず肘を曲げるだけで
+前方成分を稼げた**。同様に、手先位置に依存する項は**手首をひねるだけ**で満たせる。
 
-**対策**: 動かしたい関節の直後のリンクで測る (肩 -> 肘)。
+**対策**: 動かしたい関節の直後のリンクで測る（肩 → 肘）。先端側の関節は
+別途中立に固定する（`wrist_neutral_penalty`）。
 
 ### 7. 位置目標と向き目標は幾何的に競合する
 
@@ -330,7 +450,30 @@ waist を 2 関節追加したところ、hip_roll の誤差寄与が 0.125 -> 0
 
 **対策**: 腕の姿勢は向き・伸展・間隔の 3 つで完全に決まる。手の絶対位置は指定しない。
 
-### 8. 学習率が下限に張り付いたら報酬設計を疑う
+### 8. 目標を遠くすると勾配が消える
+
+腕の目標を 0.55 → 0.95 に上げた際、σ=0.12 を据え置いたため、腕が真下のときの
+誤差 0.95 がガウシアンの裾の外に出た。
+
+| fwd | `arm_forward` (σ=0.12) | `arm_shortfall_pen` (σ=0.15) |
+|---|---|---|
+| 0.00 | 6.0e-28 | -1.000 |
+| 0.05 | 3.7e-25 | -1.000 |
+| 0.20 | 1.1e-17 | -1.000 |
+
+肩を動かしても報酬が変わらないため、方策は「どちらへ動けばよいか」を知る手段が
+なかった。手首だけが曲がったのは、勾配が残っている唯一の経路を使ったため。
+
+**対策**: 原則 5 の coarse + fine。σ を変えた 2 項に分ける。
+
+### 9. 骨盤基準の姿勢計測は腰から上を見ていない
+
+`projected_gravity_b` は root（骨盤）基準。`waist_pitch` が無拘束だと、
+骨盤を垂直に保ったまま上体だけ反らせる解が無料で成立する。
+
+**対策**: 関節角を直接見る項を置く（`waist_pitch_penalty`）。
+
+### 10. 学習率が下限に張り付いたら報酬設計を疑う
 
 rsl_rl の adaptive スケジューラは KL が目標を超え続けると学習率を割り続け、
 下限 (1e-5) で止まる。**報酬が荒いと方策更新が暴れて KL が跳ね、これが起きる**。
@@ -341,46 +484,51 @@ rsl_rl の adaptive スケジューラは KL が目標を超え続けると学�
 
 ---
 
-## 未使用の関数
+## 学習時に見る指標
 
-`rewards.py` に残っているが現在の `PeriodicSquatRewardsCfg` では登録していないもの。
-
-### 箱の pick & carry タスク用 — 削除禁止
-
-`pickup_carry_env_cfg.py` (本タスク) が参照している。
-
-| 関数 | フェーズ |
-|---|---|
-| `approach_box` / `face_box` | 1-2 箱へ接近し正対する |
-| `squat_when_near_box` / `hold_still_when_squatting` / `knee_flexion_when_squatting` | 3 箱の近くでしゃがむ |
-| `hands_near_box` / `hands_contact_box` | 4 両手を箱へ |
-| `is_grasped` / `grasp_bonus` | 5 掴む |
-| `lift_box` / `stand_up_when_lifting` | 6 持ち上げて立つ |
-| `carry_box_velocity` | 7 運ぶ |
-| `drop_box_penalty` / `box_collision_penalty` | 安全 |
-
-### スクワット実験の旧版 — 参照が無ければ削除可
-
-| 旧関数 | 置き換え先 | 理由 |
-|---|---|---|
-| `knee_bent_reward` / `hip_pitch_bent_reward` / `height_low_gated_by_knee` | `squat_pose_tracking` | 関節ごとの個別項は互いに矛盾する |
-| `periodic_height_target` / `periodic_knee_target` / `periodic_hip_pitch_target` | `squat_pose_tracking` | 1 本の参照姿勢に統合 |
-| `hip_abduction_penalty` / `hip_roll_magnitude_penalty` / `feet_lateral_distance_penalty` / `leg_symmetry_penalty` | `hip_abduction_tracking`, `stance_width_penalty_phased` | 非有界かつ両側。落とし穴 2・3 |
-| `stay_in_place` / `low_base_speed` / `heading_hold` / `feet_no_slip` / `feet_stance_width` | `*_penalty` 版 | 正報酬だと棒立ちで満点。原則 1 |
-| `stance_width_penalty` | `stance_width_penalty_phased` | 固定目標では深さに応じた許容ができない |
-| `hands_forward_tracking` / `hands_at_knee_front` | `arm_forward_direction` | 位置目標が向き目標と競合。落とし穴 7 |
-| `fallen_penalty` | `bad_orientation` (終了条件) | 大きな負の報酬は自殺を招く。原則 3 |
-| `freeze_penalty` / `feet_air_time_penalty` | — | 周期目標が立ち止まりを直接潰すため不要 |
-
----
-
-## 学習時に最初に見る指標
+まず最初に見るもの:
 
 | 指標 | 健全 | 異常時の意味 |
 |---|---|---|
-| `Loss/learning_rate` | 1e-4 以上 | **下限張り付き -> 即停止**。落とし穴 8 |
-| `Loss/entropy` | 単調減少 | 横ばい -> 何も学習していない |
-| `Episode_Reward/dof_pos_lim` | -0.1 以上 | -0.5 以下 -> 参照姿勢が関節限界に食い込んでいる |
-| `Episode_Reward/torso_pitch` | 2.4 以上 / 3.0 | 低い -> 前傾できず重心が後ろのまま |
-| `Episode_Reward/pose_fine` | 上昇し続ける | 頭打ち -> 参照姿勢がまだ不安定 |
-| `Episode_Termination/fell_over` | 減少傾向 | 4 割超 -> 深さが物理的に無理 |
+| `Loss/learning_rate` | 1e-4 以上 | **下限張り付き → 即停止**。落とし穴 10 |
+| `Loss/entropy` | 単調減少 | 横ばい → 何も学習していない |
+| `Episode_Reward/dof_pos_lim` | -0.1 以上 | -0.5 以下 → 参照姿勢が関節限界に食い込んでいる |
+
+動作ごと:
+
+| 指標 | 健全 | 異常時の意味 |
+|---|---|---|
+| `pose_fine` | 上昇し続ける | 頭打ち → 参照姿勢が不安定 |
+| `torso_pitch` | 2.4 以上 / 3.0 | 低い → 前傾できず重心が後ろのまま |
+| `arm_shortfall_pen` | -0.5 以上 | -3.0 以下 → 腕が前に出ていない |
+| `arm_forward_coarse` | 上昇 | 横ばい → 肩が物理的に動かせない |
+| `wrist_pen` | -0.3 以上 | -2.0 以下 → 手首をひねって逃げている |
+| `waist_pitch_pen` | -0.3 以上 | -2.0 以下 → 上体を反らせている |
+| `hip_abduction_pen` | -0.5 以上 | -3.0 以下 → 開脚している |
+| `knee_clear_pen` | -0.2 以上 | -2.0 以下 → 手が膝に接近している |
+| `Episode_Termination/fell_over` | 減少傾向 | 4 割超 → 深さが物理的に無理 |
+
+---
+
+## 変更履歴
+
+新しいものが上。**変更したらここに 1 行追加する。**
+
+| 日付 | 変更 | 理由 |
+|---|---|---|
+| 08-27 | `arm_forward` を coarse(σ0.60) + fine(σ0.15) に分割。`arm_shortfall_pen` の σ を 0.15 → 0.60 | 目標 0.95 に対し σ が狭く、腕が真下のとき勾配が 10⁻²⁷ 桁で消えていた（落とし穴 8） |
+| 08-27 | `wrist_neutral_penalty` 追加（3.0）。旧 `wrist_default` を置換 | 肩の勾配が無い間、方策が手首だけをひねって手先位置の項を満たしていた |
+| 08-27 | `waist_pitch_penalty` 追加（4.0） | `projected_gravity_b` は骨盤基準で、上体の反りを検出できなかった（落とし穴 9） |
+| 08-27 | 未使用関数 15 個を削除（58 → 43） | 到達可能性の推移閉包で判定。箱タスク参照分は保護 |
+| 08-26 | `SQUAT_ARM_FWD` 0.55 → 0.95。`arm_forward_shortfall_penalty`（8.0）と `hands_knee_clearance_penalty`（4.0）を追加 | fwd 0.55 では手の到達点が膝と同座標になり腕がめり込んでいた |
+| 08-26 | `arm_forward_direction` を「肩→手」から「肩→肘」に変更 | 肘を曲げるだけで前方成分を稼げ、肩が回らなかった（落とし穴 6） |
+| 08-26 | 参照姿勢を knee 2.40→2.20 / ankle -0.80→-0.75 / hip -1.95→-2.10（前傾 20°→37°） | 重心が踵から 8cm しか余裕がなく、追従と生存が両立していなかった（原則 4） |
+| 08-26 | `torso_pitch_tracking` 追加（3.0） | 前傾は関節誤差の和では直接支配できず、重心の前後位置がずれていた |
+| 08-26 | `hands_at_knee_front` を削除、`hands_width_match` を追加 | 位置目標が向き目標と競合。「対称」だけでは両手が重なっていても満点（落とし穴 4, 7） |
+| 08-26 | 開脚抑制を片側ペナルティ化。`hip_abduction_tracking` 6.0 / `stance_pen` 5.0 | 両側目標だと脚を閉じた棒立ちが不当に減点されていた（落とし穴 3） |
+| 08-25 | 定位置保持を正報酬からペナルティへ全面変更 | 棒立ちで満点の 5.0 が無条件に入り、棒立ちが 61% を稼いでいた（原則 1） |
+| 08-25 | `squat_pose_tracking` を coarse + fine の 2 段構えに | 深い目標で単一 σ では底の勾配が消えていた（原則 5・初回） |
+| 08-24 | v2 全面書き直し。参照姿勢トラッキング 1 本化、全項を [0,1] 有界の正値に | 個別関節の項が互いに矛盾。負の合計で自殺していた（原則 2） |
+| 08-24 | 転倒をペナルティから終了条件へ移動 | 大きな負の報酬が早期終了を誘発（原則 3） |
+| 08-24 | 全 `SceneEntityCfg` を `RewTerm(params=...)` に明示 | デフォルト引数では解決されず全 29 関節を指していた（落とし穴 1） |
+| 08-24 | `squat_only_env_cfg.py` を新設、周期スクワットタスクを分離 | 箱タスクの 7 フェーズ同時学習では収束しなかった |

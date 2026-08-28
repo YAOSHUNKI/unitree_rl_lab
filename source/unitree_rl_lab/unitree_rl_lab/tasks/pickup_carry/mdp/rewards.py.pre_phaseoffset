@@ -57,14 +57,14 @@ def _hand_positions_w(
     return robot.data.body_pos_w[:, body_ids, :]
 
 
-def _squat_phase(env: "ManagerBasedRLEnv", period: float, phase_offset: float = 0.0) -> torch.Tensor:
-    """[0, 1) の周期位相。0=立ち、0.5=しゃがみ、1=立ち。phase_offset で開始位相をずらせる。"""
-    return (((env.episode_length_buf * env.step_dt) % period) / period + phase_offset) % 1.0
+def _squat_phase(env: "ManagerBasedRLEnv", period: float) -> torch.Tensor:
+    """[0, 1) の周期位相。0=立ち、0.5=しゃがみ、1=立ち。"""
+    return ((env.episode_length_buf * env.step_dt) % period) / period
 
 
-def _squat_depth(env: "ManagerBasedRLEnv", period: float, phase_offset: float = 0.0) -> torch.Tensor:
+def _squat_depth(env: "ManagerBasedRLEnv", period: float) -> torch.Tensor:
     """[0, 1] のしゃがみ深さ。0=立ち期、1=しゃがみピーク。"""
-    phi = _squat_phase(env, period, phase_offset)
+    phi = _squat_phase(env, period)
     return 0.5 - 0.5 * torch.cos(2 * math.pi * phi)
 
 
@@ -329,7 +329,6 @@ def upright_bonus(
 def squat_pose_tracking(
     env: "ManagerBasedRLEnv",
     period: float = 6.0,
-    phase_offset: float = 0.0,
     std: float = 0.50,
     stand_hip_pitch: float = -0.10,
     squat_hip_pitch: float = -0.95,
@@ -354,7 +353,7 @@ def squat_pose_tracking(
     NOTE: 4つの SceneEntityCfg は必ず RewTerm(params=...) で渡すこと。
     """
     robot: Articulation = env.scene[hip_pitch_cfg.name]
-    depth = _squat_depth(env, period, phase_offset).unsqueeze(-1)  # (N, 1)
+    depth = _squat_depth(env, period).unsqueeze(-1)  # (N, 1)
 
     err_sq = torch.zeros(env.num_envs, device=robot.data.joint_pos.device)
 
@@ -377,7 +376,6 @@ def squat_pose_tracking(
 def squat_height_tracking(
     env: "ManagerBasedRLEnv",
     period: float = 6.0,
-    phase_offset: float = 0.0,
     stand_height: float = 0.74,
     squat_height: float = 0.52,
     std: float = 0.10,
@@ -385,7 +383,7 @@ def squat_height_tracking(
 ) -> torch.Tensor:
     """胴体高さの参照追従 [0, 1]。関節角だけ合っていて体が浮く/傾く解を潰す。"""
     robot: Articulation = env.scene[robot_cfg.name]
-    depth = _squat_depth(env, period, phase_offset)
+    depth = _squat_depth(env, period)
     target = stand_height + (squat_height - stand_height) * depth
     err = robot.data.root_pos_w[:, 2] - target
     return torch.exp(-(err * err) / (std * std))
@@ -610,7 +608,6 @@ def torso_roll_penalty(
 def hip_abduction_tracking(
     env: "ManagerBasedRLEnv",
     period: float = 6.0,
-    phase_offset: float = 0.0,
     stand_abduction: float = 0.00,
     squat_abduction: float = 0.18,
     std: float = 0.12,
@@ -626,7 +623,7 @@ def hip_abduction_tracking(
     NOTE: robot_cfg は hip_roll だけを含む SceneEntityCfg を params で渡すこと。
     """
     robot: Articulation = env.scene[robot_cfg.name]
-    depth = _squat_depth(env, period, phase_offset)
+    depth = _squat_depth(env, period)
     target = stand_abduction + (squat_abduction - stand_abduction) * depth
 
     abd = robot.data.joint_pos[:, robot_cfg.joint_ids].abs().mean(dim=-1)
@@ -639,7 +636,6 @@ def hip_abduction_tracking(
 def stance_width_penalty_phased(
     env: "ManagerBasedRLEnv",
     period: float = 6.0,
-    phase_offset: float = 0.0,
     stand_width: float = 0.20,
     squat_width: float = 0.28,
     std: float = 0.08,
@@ -653,7 +649,7 @@ def stance_width_penalty_phased(
     NOTE: robot_cfg は足の body_names を含む SceneEntityCfg を params で渡すこと。
     """
     robot: Articulation = env.scene[robot_cfg.name]
-    depth = _squat_depth(env, period, phase_offset)
+    depth = _squat_depth(env, period)
     target = stand_width + (squat_width - stand_width) * depth
 
     feet_w = robot.data.body_pos_w[:, robot_cfg.body_ids, :]      # (N, 2, 3)
@@ -750,7 +746,6 @@ def _sorted_by_lateral(rel_b: torch.Tensor) -> torch.Tensor:
 def arm_extension_penalty(
     env: "ManagerBasedRLEnv",
     period: float = 6.0,
-    phase_offset: float = 0.0,
     min_straightness: float = 0.97,
     std: float = 0.06,
     shoulder_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
@@ -768,7 +763,7 @@ def arm_extension_penalty(
 
     NOTE: 3つの SceneEntityCfg は必ず params で渡すこと。
     """
-    depth = _squat_depth(env, period, phase_offset)
+    depth = _squat_depth(env, period)
 
     sh = _sorted_by_lateral(_bodies_in_yaw_frame(env, shoulder_cfg))   # (N, 2, 3)
     el = _sorted_by_lateral(_bodies_in_yaw_frame(env, elbow_cfg))
@@ -809,7 +804,6 @@ def arm_extension_penalty(
 def arm_forward_direction(
     env: "ManagerBasedRLEnv",
     period: float = 6.0,
-    phase_offset: float = 0.0,
     stand_forward: float = 0.00,
     squat_forward: float = 0.65,
     std: float = 0.15,
@@ -829,7 +823,7 @@ def arm_forward_direction(
     NOTE: shoulder_cfg / elbow_cfg は body_names を持つ SceneEntityCfg を
           params で渡すこと。
     """
-    depth = _squat_depth(env, period, phase_offset)
+    depth = _squat_depth(env, period)
 
     sh = _sorted_by_lateral(_bodies_in_yaw_frame(env, shoulder_cfg))   # (N, 2, 3)
     el = _sorted_by_lateral(_bodies_in_yaw_frame(env, elbow_cfg))
@@ -844,7 +838,6 @@ def arm_forward_direction(
 def torso_pitch_tracking(
     env: "ManagerBasedRLEnv",
     period: float = 6.0,
-    phase_offset: float = 0.0,
     stand_pitch: float = 0.00,
     squat_pitch: float = 0.65,
     std: float = 0.15,
@@ -860,7 +853,7 @@ def torso_pitch_tracking(
     projected_gravity_b = (gx, gy, gz)。前傾角 theta に対し gx = sin(theta)。
     """
     robot: Articulation = env.scene[robot_cfg.name]
-    depth = _squat_depth(env, period, phase_offset)
+    depth = _squat_depth(env, period)
     target = torch.sin(torch.as_tensor(stand_pitch, device=depth.device)
                        + (squat_pitch - stand_pitch) * depth)
     err = robot.data.projected_gravity_b[:, 0] - target
@@ -883,7 +876,6 @@ def torso_pitch_tracking(
 def arm_forward_shortfall_penalty(
     env: "ManagerBasedRLEnv",
     period: float = 6.0,
-    phase_offset: float = 0.0,
     min_forward: float = 0.85,
     std: float = 0.60,
     shoulder_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
@@ -897,7 +889,7 @@ def arm_forward_shortfall_penalty(
 
     上腕(肩->肘)で測るので、肘を曲げて手先だけ前に出す解では回避できない。
     """
-    depth = _squat_depth(env, period, phase_offset)
+    depth = _squat_depth(env, period)
 
     sh = _sorted_by_lateral(_bodies_in_yaw_frame(env, shoulder_cfg))
     el = _sorted_by_lateral(_bodies_in_yaw_frame(env, elbow_cfg))
