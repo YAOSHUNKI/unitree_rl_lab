@@ -70,6 +70,12 @@ STAND_HEIGHT, SQUAT_HEIGHT = 0.73, 0.39
 # 0.95 なら腕が伸びていれば手は肩の約11cm下 = 胸の高さに来る。
 # 0.55 では手の到達点が膝とほぼ同座標になり、腕が膝にめり込む。
 STAND_ARM_FWD,  SQUAT_ARM_FWD  = 0.00,  0.95
+
+# 肩・肘の関節目標 (MuJoCo モデル deploy/mujoco_py/g1_model/g1_29dof.xml から実測)
+#   shoulder_pitch: 負が前方。0.194 で真下。-0.45 は前傾37度と合わせて world fwd 0.962
+#   elbow         : 0 は 73 度曲がった姿勢。1.276 で完全伸展 (デフォルト 0.97 は 17.7 度)
+STAND_SHOULDER_PITCH, SQUAT_SHOULDER_PITCH = 0.20, -0.45
+STAND_ELBOW,          SQUAT_ELBOW          = 0.97,  1.25
 ARM_FWD_MIN = 0.85          # これを下回ると arm_shortfall_pen で大幅減点
 
 # 胴の前傾 [rad]。股関節が足首の真上に来る条件は knee = 2 x |ankle|。
@@ -106,6 +112,9 @@ SHOULDER_CFG    = SceneEntityCfg("robot", body_names=[".*_shoulder_yaw_link"])
 ELBOW_CFG       = SceneEntityCfg("robot", body_names=[".*_elbow_link"])
 WAIST_PITCH_CFG = SceneEntityCfg("robot", joint_names=["waist_pitch_joint"])
 WRIST_CFG       = SceneEntityCfg("robot", joint_names=[".*_wrist_.*_joint"])
+SH_PITCH_CFG    = SceneEntityCfg("robot", joint_names=[".*_shoulder_pitch_joint"])
+SH_YAW_CFG      = SceneEntityCfg("robot", joint_names=[".*_shoulder_yaw_joint"])
+ELBOW_JOINT_CFG = SceneEntityCfg("robot", joint_names=[".*_elbow_joint"])
 FOOT_SENSOR_CFG = SceneEntityCfg("foot_contact", body_names=[FOOT_BODY_REGEX])
 
 _POSE_PARAMS = dict(
@@ -117,6 +126,16 @@ _POSE_PARAMS = dict(
     knee_cfg=KNEE_CFG,
     ankle_cfg=ANKLE_CFG,
     lateral_cfg=LATERAL_CFG,
+)
+
+
+_ARM_PARAMS = dict(
+    period=SQUAT_PERIOD,
+    stand_shoulder_pitch=STAND_SHOULDER_PITCH, squat_shoulder_pitch=SQUAT_SHOULDER_PITCH,
+    stand_elbow=STAND_ELBOW,                   squat_elbow=SQUAT_ELBOW,
+    shoulder_pitch_cfg=SH_PITCH_CFG,
+    elbow_cfg=ELBOW_JOINT_CFG,
+    shoulder_yaw_cfg=SH_YAW_CFG,
 )
 
 
@@ -155,16 +174,18 @@ class PeriodicSquatRewardsCfg:
     # 2段構え。目標を 0.95 まで上げたことで、腕が真下のときの誤差が
     # 0.95 に達し、狭い std だけでは勾配が完全に消える (1e-28 桁)。
     # coarse が遠方からの誘導を、fine が精度を担当する。
-    arm_forward_coarse = RewTerm(
-        func=mdp.arm_forward_direction, weight=3.0,
-        params=dict(
-            period=SQUAT_PERIOD, std=0.60,
-            stand_forward=STAND_ARM_FWD, squat_forward=SQUAT_ARM_FWD,
-            shoulder_cfg=SHOULDER_CFG, elbow_cfg=ELBOW_CFG,
-        ),
+    # 肩・肘の関節目標を直接追従 (腕の主報酬)。coarse+fine の2段構え。
+    arm_pose_coarse = RewTerm(
+        func=mdp.arm_pose_tracking, weight=4.0,
+        params=dict(std=0.70, **_ARM_PARAMS),
     )
+    arm_pose_fine = RewTerm(
+        func=mdp.arm_pose_tracking, weight=6.0,
+        params=dict(std=0.25, **_ARM_PARAMS),
+    )
+    # world 座標での向きの確認 (関節目標だけでは胴の傾き次第で向きがずれる)
     arm_forward = RewTerm(
-        func=mdp.arm_forward_direction, weight=4.0,
+        func=mdp.arm_forward_direction, weight=3.0,
         params=dict(
             period=SQUAT_PERIOD, std=0.15,
             stand_forward=STAND_ARM_FWD, squat_forward=SQUAT_ARM_FWD,

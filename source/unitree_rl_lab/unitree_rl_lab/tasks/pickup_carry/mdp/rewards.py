@@ -988,3 +988,59 @@ def wrist_neutral_penalty(
     excess = (q.abs() - max_abs).clamp(min=0.0).mean(dim=-1)
     return torch.exp(-(excess * excess) / (std * std)) - 1.0
 
+# ---------------------------------------------------------------------------
+# 腕の関節空間トラッキング
+# ---------------------------------------------------------------------------
+# 幾何ベース (arm_forward_direction) は「どの向きにしたいか」を符号規約を知らずに
+# 書けるのが利点だが、肩関節そのものへの勾配としては間接的。
+# MuJoCo モデル (deploy/mujoco_py/g1_model/g1_29dof.xml) から実測した値で
+# 関節空間の目標を直接与える。
+#
+# G1 29DOF 左腕の実測値:
+#   shoulder_pitch  axis=(0,1,0)  range=[-3.089, 2.670]
+#     上腕ベクトル (shoulder_yaw_link -> elbow_link) = (0.0158, 0, -0.0805)
+#     -> 負が前方。0.194 で真下、-0.45 で局所 36.9 度前
+#   elbow           axis=(0,1,0)  range=[-1.047, 2.094]
+#     前腕ベクトル (elbow_link -> wrist_roll_link) = (0.100, 0.002, -0.010)
+#     -> elbow=0 は上腕と 73 度をなす「曲がった」姿勢。
+#        真っ直ぐになるのは elbow=+1.276。デフォルト 0.97 は既に 17.7 度。
+# ---------------------------------------------------------------------------
+
+
+def arm_pose_tracking(
+    env: "ManagerBasedRLEnv",
+    period: float = 6.0,
+    std: float = 0.50,
+    stand_shoulder_pitch: float = 0.20,
+    squat_shoulder_pitch: float = -0.45,
+    stand_elbow: float = 0.97,
+    squat_elbow: float = 1.25,
+    shoulder_pitch_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    elbow_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    shoulder_yaw_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """腕の参照姿勢への追従度 [0, 1]。肩関節を直接動かす主報酬。
+
+    shoulder_pitch と elbow を位相の目標へ追従させ、shoulder_yaw を 0 に固定する。
+    shoulder_roll はデフォルトが左右で符号反転 (+0.25 / -0.25) するためここでは
+    扱わず、手の左右間隔 (hands_width_match) に任せる。
+
+    NOTE: 3つの SceneEntityCfg は必ず RewTerm(params=...) で渡すこと。
+    """
+    robot: Articulation = env.scene[shoulder_pitch_cfg.name]
+    depth = _squat_depth(env, period).unsqueeze(-1)
+
+    err_sq = torch.zeros(env.num_envs, device=robot.data.joint_pos.device)
+    for cfg, q_stand, q_squat in (
+        (shoulder_pitch_cfg, stand_shoulder_pitch, squat_shoulder_pitch),
+        (elbow_cfg, stand_elbow, squat_elbow),
+    ):
+        target = q_stand + (q_squat - q_stand) * depth
+        q = robot.data.joint_pos[:, cfg.joint_ids]
+        err_sq = err_sq + ((q - target) ** 2).mean(dim=-1)
+
+    q_yaw = robot.data.joint_pos[:, shoulder_yaw_cfg.joint_ids]
+    err_sq = err_sq + (q_yaw ** 2).mean(dim=-1)
+
+    return torch.exp(-err_sq / (std * std))
+
