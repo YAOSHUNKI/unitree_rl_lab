@@ -74,7 +74,7 @@ STAND_ARM_FWD,  SQUAT_ARM_FWD  = 0.00,  0.95
 # 肩・肘の関節目標 (MuJoCo モデル deploy/mujoco_py/g1_model/g1_29dof.xml から実測)
 #   shoulder_pitch: 負が前方。0.194 で真下。-0.45 は前傾37度と合わせて world fwd 0.962
 #   elbow         : 0 は 73 度曲がった姿勢。1.276 で完全伸展 (デフォルト 0.97 は 17.7 度)
-STAND_SHOULDER_PITCH, SQUAT_SHOULDER_PITCH = 0.20, -0.45
+STAND_SHOULDER_PITCH, SQUAT_SHOULDER_PITCH = 0.20, -0.80
 STAND_ELBOW,          SQUAT_ELBOW          = 0.97,  1.25
 ARM_FWD_MIN = 0.85          # これを下回ると arm_shortfall_pen で大幅減点
 
