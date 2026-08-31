@@ -1,4 +1,4 @@
-"""PPO runner config for the whole-body pickup-and-carry task."""
+"""PPO runner config for the whole-body squat_only task."""
 
 from isaaclab.utils import configclass
 from isaaclab_rl.rsl_rl import (
@@ -17,9 +17,6 @@ class G1SquatBasePPORunnerCfg(RslRlOnPolicyRunnerCfg):
     empirical_normalization = True
 
     policy = RslRlPpoActorCriticCfg(
-        # アクションスケールを関節ごとに上げた (落とし穴 16) ので、
-        # 関節目標のノイズ = scale * init_noise_std が 4 倍に膨らんでいた。
-        # 膝で 46 度の乱れになりロボットがよろけていた (落とし穴 18)。
         init_noise_std=0.35,
         actor_hidden_dims=[512, 256, 128],
         critic_hidden_dims=[512, 256, 128],
@@ -43,6 +40,4 @@ class G1SquatBasePPORunnerCfg(RslRlOnPolicyRunnerCfg):
 
 @configclass
 class G1PeriodicSquatPPORunnerCfg(G1SquatBasePPORunnerCfg):
-    """PeriodicSquat 専用のログ出力設定。"""
-
     experiment_name = "squat_only"
