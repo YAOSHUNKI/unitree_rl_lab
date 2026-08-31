@@ -26,7 +26,7 @@ squat_stand_lift/
     └── g1/29dof/
         ├── __init__.py                      gym.register
         └── squat_stand_lift_env_cfg.py      
-
+```
 ---
 
 ## 動作フェーズ
