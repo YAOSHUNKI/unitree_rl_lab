@@ -114,6 +114,9 @@ WAIST_PITCH_CFG = SceneEntityCfg("robot", joint_names=["waist_pitch_joint"])
 WRIST_CFG       = SceneEntityCfg("robot", joint_names=[".*_wrist_.*_joint"])
 SH_PITCH_CFG    = SceneEntityCfg("robot", joint_names=[".*_shoulder_pitch_joint"])
 SH_YAW_CFG      = SceneEntityCfg("robot", joint_names=[".*_shoulder_yaw_joint"])
+# 参照姿勢を持たないが放置すると逃げ道になる関節 (落とし穴 19)
+SH_ROLL_CFG     = SceneEntityCfg("robot", joint_names=[".*_shoulder_roll_joint"])
+ANKLE_ROLL_CFG  = SceneEntityCfg("robot", joint_names=[".*_ankle_roll_joint"])
 ELBOW_JOINT_CFG = SceneEntityCfg("robot", joint_names=[".*_elbow_joint"])
 FOOT_SENSOR_CFG = SceneEntityCfg("foot_contact", body_names=[FOOT_BODY_REGEX])
 
@@ -265,7 +268,7 @@ class PeriodicSquatRewardsCfg:
     )
     # 手が膝にめり込んだらマイナス
     knee_clear_pen = RewTerm(
-        func=mdp.hands_knee_clearance_penalty, weight=4.0,
+        func=mdp.hands_knee_clearance_penalty, weight=5.0,
         params=dict(
             period=SQUAT_PERIOD, min_distance=0.18, std=0.08,
             hand_cfg=HAND_BODY_CFG, knee_cfg=KNEE_BODY_CFG,
@@ -282,8 +285,31 @@ class PeriodicSquatRewardsCfg:
         params=dict(max_abs=0.10, std=0.12, robot_cfg=WAIST_PITCH_CFG),
     )
     # 胴が左右に傾いたらマイナス (前傾ピッチは罰しない)
+    # --- 参照姿勢を持たない関節の逃げ道を塞ぐ (落とし穴 19) ---
+    # shoulder_roll は腕を横に開閉する。arm_pose_tracking に入っていないため、
+    # 肩を前に出さずに腕を横→下へ振って hands_width だけ満たす解が成立していた。
+    shoulder_roll_pen = RewTerm(
+        func=mdp.joint_default_deviation_penalty, weight=3.0,
+        params=dict(margin=0.15, std=0.30, robot_cfg=SH_ROLL_CFG),
+    )
+    # ankle_roll は横方向の連鎖で唯一まったく拘束されていなかった。
+    ankle_roll_pen = RewTerm(
+        func=mdp.joint_default_deviation_penalty, weight=2.0,
+        params=dict(margin=0.10, std=0.20, robot_cfg=ANKLE_ROLL_CFG),
+    )
+    # --- 左右で打ち消し合う非対称姿勢を潰す ---
+    # 「膝が左・胴が右」は倒れないので、個別の関節罰だけでは抜け出せない。
+    # 左右の中点で見るので、対称な開脚は無罰。
+    knee_lateral_pen = RewTerm(
+        func=mdp.lateral_offset_penalty, weight=3.0,
+        params=dict(std=0.06, body_cfg=KNEE_BODY_CFG),
+    )
+    feet_lateral_pen = RewTerm(
+        func=mdp.lateral_offset_penalty, weight=2.0,
+        params=dict(std=0.08, body_cfg=FEET_BODY_CFG),
+    )
     torso_roll_pen = RewTerm(
-        func=mdp.torso_roll_penalty, weight=1.0,
+        func=mdp.torso_roll_penalty, weight=3.0,
         params=dict(std=0.25, robot_cfg=SceneEntityCfg("robot")),
     )
     # 胴が正面からヨー方向にずれたらマイナス

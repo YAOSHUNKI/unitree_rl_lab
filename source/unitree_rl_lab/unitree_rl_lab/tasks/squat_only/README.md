@@ -289,7 +289,11 @@ target = stand_value + (squat_value - stand_value) * depth
 | `squat_shortfall_pen` | `squat_depth_shortfall_penalty` | 3.0 | 0.90 | しゃがみが浅い `d` |
 | `hip_abduction_pen` | `hip_abduction_tracking` | 3.0 | 0.12 | 開脚（hip_roll） `d` |
 | `stance_pen` | `stance_width_penalty_phased` | 2.5 | 0.08 | 足幅の広がり `d` |
-| `knee_clear_pen` | `hands_knee_clearance_penalty` | 2.0 | 0.08 | 手が膝にめり込む `d` |
+| `knee_clear_pen` | `hands_knee_clearance_penalty` | 5.0 | 0.08 | 手が膝にめり込む `d` |
+| `shoulder_roll_pen` | `joint_default_deviation_penalty` | 3.0 | 0.30 | 腕を横に振る逃げ道 |
+| `knee_lateral_pen` | `lateral_offset_penalty` | 3.0 | 0.06 | 両膝が同じ側に寄る |
+| `ankle_roll_pen` | `joint_default_deviation_penalty` | 2.0 | 0.20 | 足首の左右傾き |
+| `feet_lateral_pen` | `lateral_offset_penalty` | 2.0 | 0.08 | 両足が同じ側に寄る |
 | `backlean_pen` | `torso_backlean_penalty` | 3.0 | 0.15 | 体全体を後ろに反らす |
 | `waist_pitch_pen` | `waist_pitch_penalty` | 4.0 | 0.12 | 腰から上だけの反り |
 | `arm_ext_pen` | `arm_extension_penalty` | 1.5 | 0.10 | 肘の曲がり `d` |
@@ -297,7 +301,7 @@ target = stand_value + (squat_value - stand_value) * depth
 | `drift_pen` | `drift_penalty` | 3.0 | 0.60 | 水平ドリフト |
 | `slip_pen` | `feet_slip_penalty` | 1.0 | 0.30 | 足の滑り |
 | `hands_sym_pen` | `hands_symmetry_penalty` | 1.0 | 0.20 | 手の左右非対称 |
-| `torso_roll_pen` | `torso_roll_penalty` | 1.0 | 0.25 | 胴の左右傾き |
+| `torso_roll_pen` | `torso_roll_penalty` | 3.0 | 0.25 | 胴の左右傾き |
 | `heading_pen` | `heading_penalty` | 2.0 | — | ヨー方向のずれ（向き） |
 | `yaw_rate_pen` | `yaw_rate_penalty` | 2.0 | 0.50 | その場回転（角速度）|
 | `speed_pen` | `base_speed_penalty` | 0.5 | 0.40 | 水平速度 |
@@ -504,6 +508,26 @@ straightness = ||肩->手|| / (||肩->肘|| + ||肘->手||)
 | `torso_roll_penalty` | `projected_gravity_b[:, 1]` のみ。**前傾を一切罰さずにロールだけ潰す** |
 
 ### 内部ヘルパー
+
+#### `joint_default_deviation_penalty(env, margin, std, robot_cfg)` → [-1,0]
+
+`default_joint_pos` からのずれを罰する。片側・有界。
+**左右で符号が反転する関節**（`shoulder_roll` は +0.25 / -0.25）にもそのまま使える。
+目標値をハードコードする必要がない。
+
+参照姿勢を追う関節（`hip_pitch` / `knee` / `shoulder_pitch` など）には**使わない** —
+デフォルトへ引き戻す力がタスクと衝突する。「動いてほしくないのに拘束が無い」関節専用。
+
+#### `lateral_offset_penalty(env, std, body_cfg)` → [-1,0]
+
+左右ボディの**中点**が骨盤の真下から横にずれた分を罰する。
+
+対称な開脚（左 +0.10 / 右 -0.10）は中点 0 なので**無罰**。
+両方が同じ側に寄ったときだけ発火する。yaw フレームなので向きに依存せず、
+関節の符号規約も知らなくてよい。
+
+「膝が左・胴が右」のように**左右の傾きが打ち消し合って倒れない**非対称姿勢は、
+個別の関節ペナルティでは抜け出せない（落とし穴 19）。
 
 #### `torso_backlean_penalty(env, margin=0.10, std=0.15, robot_cfg)` → [-1,0]
 
@@ -845,6 +869,53 @@ TensorBoard から実際の物理量は逆算できる:
 そのうえで**飽和しているペナルティは σ を広げてから重みを上げる** —
 飽和した項は勾配が 0 なので、重みだけ上げても方策は直しようがない。
 
+### 19. 参照姿勢を持たない関節が「逃げ道」になる
+
+**関節空間の追従は合っているのに幾何が合わない**なら、追従項に入っていない関節が
+仕事をしている。TensorBoard で直接読める:
+
+| 指標 | 値 | 見るところ |
+|---|---:|---|
+| `arm_pose_coarse` | 1.65 / 4.0 = **41%** | 関節空間（shoulder_pitch / elbow / shoulder_yaw）|
+| `arm_forward` | 0.48 / 3.0 = **16%** | 幾何（上腕の world 向き）|
+
+関節は 41% 合っているのに実際の腕の向きは 16%。上腕を動かせて
+`arm_pose_tracking` に入っていない関節は **`shoulder_roll`** だけ。
+`hands_width_match`（手の間隔＝膝幅）を満たす最も安価な手段が shoulder_roll なので、
+肩を前に出さずに腕を横→下へ振って間隔だけ合わせ、**手が膝に落ちていた**。
+
+同じ穴が横方向の連鎖にもあった:
+
+| 関節 | 拘束 |
+|---|---|
+| `hip_roll` | `hip_abduction_pen`（絶対値の平均なので「両脚とも左」を区別できない）|
+| `waist_roll` | `LATERAL_CFG` に混在 → 4 関節の平均で寄与 **1/4**（落とし穴 5）|
+| `ankle_roll` | **なし** |
+| 胴の roll | `torso_roll_pen` weight 1.0 ← 弱い |
+
+「膝が左・胴が右」は互いに打ち消して**倒れない**ので、弱い罰では抜け出せない。
+
+**対処**:
+
+1. 動いてほしくない無拘束の関節は `joint_default_deviation_penalty` で
+   デフォルトに留める（`shoulder_roll` 3.0 / `ankle_roll` 2.0）
+2. 打ち消し合う非対称は、個別の関節ではなく **左右の中点のずれ**を見る
+   （`lateral_offset_penalty`）。対称な開脚は無罰のまま、片寄りだけ罰せる
+
+**点検手順**: 29 関節を一覧にして「参照姿勢を追う」「0 に固定」「デフォルト維持」の
+どれかに必ず割り当てる。**どこにも属さない関節を残さない。**
+
+現在の割り当て（29 関節すべてに役割あり）:
+
+| 役割 | 関節 | 担当する項 |
+|---|---|---|
+| 参照姿勢を追う | hip_pitch / knee / ankle_pitch / shoulder_pitch / elbow | `squat_pose_tracking` / `arm_pose_tracking` |
+| 0 に固定 | hip_yaw / waist_yaw / waist_roll / shoulder_yaw | `LATERAL_CFG` / `arm_pose_tracking` |
+| デフォルト維持 | **shoulder_roll** / **ankle_roll** | `joint_default_deviation_penalty` |
+| 中立維持 | wrist_roll / pitch / yaw | `wrist_neutral_penalty` |
+| 専用項 | hip_roll（開脚）/ waist_pitch（反り） | `hip_abduction_tracking` / `waist_pitch_penalty` |
+
+
 ---
 
 ## 学習時に見る指標
@@ -867,6 +938,9 @@ TensorBoard から実際の物理量は逆算できる:
 | `pose_fine` | 上昇し続ける | 頭打ち → 参照姿勢が不安定 |
 | `torso_pitch` | 2.4 以上 / 3.0 | 低い → 前傾できず重心が後ろのまま |
 | `arm_shortfall_pen` | -0.3 以上 | -1.0 以下 → 腕が前に出ていない |
+| `arm_pose_*` と `arm_forward` | 同じ割合で上がる | 関節だけ高い → 無拘束の関節が逃げ道（落とし穴 19）|
+| `knee_lateral_pen` / `feet_lateral_pen` | -0.3 以上 | -1.5 以下 → 左右どちらかに寄っている |
+| `shoulder_roll_pen` | -0.3 以上 | -1.5 以下 → 腕を横に振って逃げている |
 | `squat_shortfall_pen` | -0.3 以上 | -1.2 付近で張り付き → 棒立ちのまま |
 | `yaw_rate_pen` | -0.2 以上 | -1.0 以下 → その場回転している |
 | `backlean_pen` | -0.3 以上 | -1.5 以下 → 体を後ろに反らしている |
@@ -887,6 +961,7 @@ TensorBoard から実際の物理量は逆算できる:
 
 | 日付 | 変更 | 理由 |
 |---|---|---|
+| 08-31 | `joint_default_deviation_penalty` と `lateral_offset_penalty` を新設。`shoulder_roll_pen`(3.0) / `ankle_roll_pen`(2.0) / `knee_lateral_pen`(3.0) / `feet_lateral_pen`(2.0) を追加。`torso_roll_pen` 1.0→3.0、`knee_clear_pen` 4.0→5.0 | `shoulder_roll` と `ankle_roll` がどの報酬項にも入っておらず逃げ道になっていた（落とし穴 19）。肩を前に出す代わりに腕を横→下へ振って `hands_width` だけ満たしていたため手が膝に食い込み、`arm_pose` 41% に対し `arm_forward` は 16% しかなかった。「膝が左・胴が右」は打ち消し合って倒れないので、左右の中点のずれを見る項で潰した |
 | 08-31 | `init_noise_std` 0.8 → **0.35**、hip_pitch/knee のスケール 1.0 → **0.8**、`action_rate` -0.005 → **-0.015**、`drift_pen` w1.0/σ0.25 → **w3.0/σ0.60**、`hands_sym_pen` w0.5/σ0.10 → **w1.0/σ0.20** | 落とし穴 16 でスケールを 4 倍にしたのにノイズを据え置いたため、膝の目標が 46 度で暴れ、よろけて 42 cm ドリフトしていた（落とし穴 18）。`drift_pen` と `hands_sym_pen` は σ が狭くて飽和し勾配ゼロだったので σ を広げてから重みを上げた。腕は改善済み（`arm_shortfall_pen` -0.87 → -0.19、`arm_pose_coarse` 0.02 → 1.65）|
 | 08-28 | **箱タスク（pickup_carry）を全削除**。基底を `base_env_cfg.py` （`G1SquatBaseEnvCfg`）に切り出し、シーンの `box`・箱の観測・`reset_box` を除去。`mdp` から箱専用の 24 関数を削除（rewards 53→35、observations 6→1、events 1→0）。gym 登録 `PickupCarry` 2 件を削除 | 使っていないうえ、継承経由で箱がシーンに存在し観測にも入り込んでいた（落とし穴 17）。到達可能性の推移閉包で判定し、squat_only を import している外部ファイルが 0 件であることを確認してから削除 |
 | 08-28 | `SQUAT_SHOULDER_PITCH` -0.45 → **-0.80**（ユーザー変更）。追従して `.*_shoulder_pitch_joint` のアクションスケールを 0.5 → 0.6 | 完全しゃがみでの上腕が水平より 4.2 度上＝胸の高さで真っ直ぐ前方になる。scale 0.5 のままだと必要 action が -2.0 で探索幅 3σ≈2.2 の縁に張り付くため、0.6 にして -1.67 に収めた（落とし穴 16）|

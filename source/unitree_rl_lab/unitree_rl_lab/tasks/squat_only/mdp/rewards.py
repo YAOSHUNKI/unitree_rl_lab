@@ -733,6 +733,50 @@ def torso_backlean_penalty(
     deficit = (-margin - gx).clamp(min=0.0)
     return torch.exp(-(deficit * deficit) / (std * std)) - 1.0
 
+
+def joint_default_deviation_penalty(
+    env: "ManagerBasedRLEnv",
+    margin: float = 0.15,
+    std: float = 0.30,
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """デフォルト姿勢からのずれを罰する [-1, 0]。片側・有界。
+
+    `default_joint_pos` を基準にするので、**左右で符号が反転する関節**
+    (shoulder_roll は +0.25 / -0.25) にもそのまま使える。
+    目標値をハードコードする必要がない。
+
+    margin だけは無罰にして、それを超えた分から罰する。
+
+    NOTE: 参照姿勢を追う関節 (hip_pitch / knee / shoulder_pitch など) には
+          使わないこと。デフォルトに引き戻す力がタスクと衝突する。
+          「動いてほしくないのに拘束が無い」関節専用。
+    """
+    robot: Articulation = env.scene[robot_cfg.name]
+    q = robot.data.joint_pos[:, robot_cfg.joint_ids]
+    q0 = robot.data.default_joint_pos[:, robot_cfg.joint_ids]
+    excess = ((q - q0).abs() - margin).clamp(min=0.0).mean(dim=-1)
+    return torch.exp(-(excess * excess) / (std * std)) - 1.0
+
+
+def lateral_offset_penalty(
+    env: "ManagerBasedRLEnv",
+    std: float = 0.06,
+    body_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """左右のボディの中点が骨盤の真下から横にずれた分を罰する [-1, 0]。
+
+    「膝が左・胴が右」のように、左右の傾きが互いに打ち消し合って
+    倒れずに安定してしまう非対称姿勢を潰す (落とし穴 19)。
+
+    **左右の平均**を見るので、対称な開脚 (左 +0.1 / 右 -0.1) は中点 0 で無罰。
+    両方が同じ側に寄ったときだけ発火する。yaw フレームなので向きに依存せず、
+    関節の符号規約も知らなくてよい。
+    """
+    rel = _bodies_in_yaw_frame(env, body_cfg)          # (N, k, 3) 骨盤基準
+    mid_y = rel[:, :, 1].mean(dim=-1)                  # 左右中点の横位置
+    return torch.exp(-(mid_y * mid_y) / (std * std)) - 1.0
+
 # ---------------------------------------------------------------------------
 # しゃがみ切りでの腕の姿勢を強制する (大幅減点)
 # ---------------------------------------------------------------------------
