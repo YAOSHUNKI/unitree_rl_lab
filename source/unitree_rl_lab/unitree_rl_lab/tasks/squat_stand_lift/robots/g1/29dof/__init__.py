@@ -1,4 +1,4 @@
-"""Gym registration for the G1 29DOF SquatStandLift task."""
+"""Gym registration for the G1 29DOF SquatStandLift task (self-contained)."""
 
 import gymnasium as gym
 

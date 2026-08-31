@@ -9,15 +9,15 @@ from isaaclab_rl.rsl_rl import (
 
 
 @configclass
-class G1PickupCarryPPORunnerCfg(RslRlOnPolicyRunnerCfg):
+class G1SquatStandLiftPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     num_steps_per_env = 24
     max_iterations = 40000
     save_interval = 200
-    experiment_name = "g1_pickup_carry"
+    experiment_name = "g1_squat_stand_lift"
     empirical_normalization = True
 
     policy = RslRlPpoActorCriticCfg(
-        init_noise_std=0.8,
+        init_noise_std=0.35,
         actor_hidden_dims=[512, 256, 128],
         critic_hidden_dims=[512, 256, 128],
         activation="elu",
@@ -36,10 +36,3 @@ class G1PickupCarryPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         desired_kl=0.01,
         max_grad_norm=1.0,
     )
-
-
-@configclass
-class G1SquatStandLiftPPORunnerCfg(G1PickupCarryPPORunnerCfg):
-    """SquatStandLift 専用のログ出力設定。"""
-
-    experiment_name = "squat_stand_lift"
