@@ -28,8 +28,8 @@ from isaaclab.managers import TerminationTermCfg as DoneTerm
 from isaaclab.utils import configclass
 
 import unitree_rl_lab.tasks.squat_only.mdp as mdp
-from .pickup_carry_env_cfg import (
-    G1PickupCarryEnvCfg,
+from .base_env_cfg import (
+    G1SquatBaseEnvCfg,
     FOOT_BODY_REGEX,
     HAND_BODY_REGEX,
 )
@@ -225,8 +225,8 @@ class PeriodicSquatRewardsCfg:
     # ================= ペナルティ: 崩れるとマイナス (最小 -19.5) =================
     # すべて値域 [-1, 0]。静止・対称・正面向きなら 0 なので「タダ取り」できない。
     drift_pen = RewTerm(
-        func=mdp.drift_penalty, weight=1.0,
-        params=dict(std=0.25, robot_cfg=SceneEntityCfg("robot")),
+        func=mdp.drift_penalty, weight=3.0,
+        params=dict(std=0.60, robot_cfg=SceneEntityCfg("robot")),
     )
     slip_pen = RewTerm(
         func=mdp.feet_slip_penalty, weight=1.0,
@@ -235,8 +235,8 @@ class PeriodicSquatRewardsCfg:
     )
     # 手が左右非対称だとマイナス (中心が揃っているか。間隔は hands_width が担当)
     hands_sym_pen = RewTerm(
-        func=mdp.hands_symmetry_penalty, weight=0.5,
-        params=dict(std=0.10, hand_cfg=HAND_BODY_CFG),
+        func=mdp.hands_symmetry_penalty, weight=1.0,
+        params=dict(std=0.20, hand_cfg=HAND_BODY_CFG),
     )
     # しゃがみ切った時に肘が曲がっていたらマイナス (立ち位相では罰しない)
     arm_ext_pen = RewTerm(
@@ -320,7 +320,7 @@ class PeriodicSquatRewardsCfg:
 
     # ================= 正則化 =================
     ang_vel_xy   = RewTerm(func=mdp.ang_vel_xy_l2,     weight=-0.02)
-    action_rate  = RewTerm(func=mdp.action_rate_l2,    weight=-0.005)
+    action_rate  = RewTerm(func=mdp.action_rate_l2,    weight=-0.015)
     joint_acc    = RewTerm(func=mdp.joint_acc_l2,      weight=-2.5e-7)
     joint_torque = RewTerm(func=mdp.joint_torques_l2,  weight=-1.0e-6)
     dof_pos_lim  = RewTerm(func=mdp.joint_pos_limits,  weight=-1.0)
@@ -336,7 +336,7 @@ class PeriodicSquatRewardsCfg:
 
 
 @configclass
-class G1PeriodicSquatEnvCfg(G1PickupCarryEnvCfg):
+class G1PeriodicSquatEnvCfg(G1SquatBaseEnvCfg):
     rewards: PeriodicSquatRewardsCfg = PeriodicSquatRewardsCfg()
 
     def __post_init__(self):
@@ -349,6 +349,38 @@ class G1PeriodicSquatEnvCfg(G1PickupCarryEnvCfg):
         self.commands.base_velocity.rel_standing_envs = 1.0
 
         self.episode_length_s = 12.0   # 2周期
+
+        # --- アクションスケール (落とし穴 16) ---
+        # 親は scale=0.25 / use_default_offset=True なので
+        #   目標関節角 = default + 0.25 * action
+        # 深いスクワットは膝で 1.9 rad 動かす必要があり、必要な action は 7.6。
+        # 方策の探索範囲は ±3σ ≈ ±2.2 しかないので膝は 0.86 rad (49度) で
+        # 頭打ちになる = 「中腰」。肩も -2.6 が必要で届かない。
+        # 大きく動かす関節だけスケールを上げ、必要な action を ±2 以内に収める。
+        #
+        # NOTE: dict を渡すと「マッチしなかった関節は 1.0」になる。
+        #       29 関節すべてを明示すること。正規表現が二重マッチすると
+        #       resolve_matching_names_values が例外を投げる。
+        self.actions.joint_pos.scale = {
+            # 可動域が大きい関節
+            ".*_hip_pitch_joint":      0.8,   # -0.10 -> -2.10 (必要 a = -2.5)
+            ".*_knee_joint":           0.8,   #  0.30 ->  2.20 (必要 a = +2.4)
+            ".*_ankle_pitch_joint":    0.5,   # -0.20 -> -0.75 (必要 a = -1.1)
+            ".*_shoulder_pitch_joint": 0.6,   #  0.20 -> -0.80 (必要 a = -1.67)
+            ".*_elbow_joint":          0.5,   #  0.97 ->  1.25 (必要 a = +0.56)
+            # 0 付近に留めたい関節は従来どおり
+            ".*_hip_roll_joint":       0.25,
+            ".*_hip_yaw_joint":        0.25,
+            ".*_ankle_roll_joint":     0.25,
+            "waist_yaw_joint":         0.25,
+            "waist_roll_joint":        0.25,
+            "waist_pitch_joint":       0.25,
+            ".*_shoulder_roll_joint":  0.25,
+            ".*_shoulder_yaw_joint":   0.25,
+            ".*_wrist_roll_joint":     0.25,
+            ".*_wrist_pitch_joint":    0.25,
+            ".*_wrist_yaw_joint":      0.25,
+        }
 
         # --- 位相観測 (policy が今どの位相か知る必要がある) ---
         self.observations.policy.squat_phase = ObsTerm(
@@ -377,7 +409,8 @@ class G1PeriodicSquatEnvCfg(G1PickupCarryEnvCfg):
                         asset_cfg=SceneEntityCfg("robot")),
         )
 
-        print(f">>> PeriodicSquat v3: period={SQUAT_PERIOD}s")
+        print(f">>> PeriodicSquat v4: period={SQUAT_PERIOD}s")
+        print("    action scale: hip_pitch/knee 1.0, ankle/shoulder/elbow 0.5, 他 0.25")
         print(f"    knee   {STAND_KNEE} -> {SQUAT_KNEE} rad")
         print(f"    height {STAND_HEIGHT} -> {SQUAT_HEIGHT} m")
         print(f"    arm    上腕の前方成分 {STAND_ARM_FWD} -> {SQUAT_ARM_FWD} (下限 {ARM_FWD_MIN})")

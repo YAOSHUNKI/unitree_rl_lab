@@ -1,4 +1,4 @@
-"""MDP building blocks for the pickup-and-carry task.
+"""MDP building blocks for the periodic-squat task.
 
 Re-exports everything from Isaac Lab's built-in MDP terms and from
 unitree_rl_lab's locomotion MDP terms so the env cfg can reference all of

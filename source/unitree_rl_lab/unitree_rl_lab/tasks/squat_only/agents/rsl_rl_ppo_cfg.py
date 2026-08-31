@@ -9,15 +9,18 @@ from isaaclab_rl.rsl_rl import (
 
 
 @configclass
-class G1PickupCarryPPORunnerCfg(RslRlOnPolicyRunnerCfg):
+class G1SquatBasePPORunnerCfg(RslRlOnPolicyRunnerCfg):
     num_steps_per_env = 24
     max_iterations = 40000
     save_interval = 200
-    experiment_name = "g1_pickup_carry"
+    experiment_name = "g1_squat_base"
     empirical_normalization = True
 
     policy = RslRlPpoActorCriticCfg(
-        init_noise_std=0.8,
+        # アクションスケールを関節ごとに上げた (落とし穴 16) ので、
+        # 関節目標のノイズ = scale * init_noise_std が 4 倍に膨らんでいた。
+        # 膝で 46 度の乱れになりロボットがよろけていた (落とし穴 18)。
+        init_noise_std=0.35,
         actor_hidden_dims=[512, 256, 128],
         critic_hidden_dims=[512, 256, 128],
         activation="elu",
@@ -39,7 +42,7 @@ class G1PickupCarryPPORunnerCfg(RslRlOnPolicyRunnerCfg):
 
 
 @configclass
-class G1PeriodicSquatPPORunnerCfg(G1PickupCarryPPORunnerCfg):
+class G1PeriodicSquatPPORunnerCfg(G1SquatBasePPORunnerCfg):
     """PeriodicSquat 専用のログ出力設定。"""
 
     experiment_name = "squat_only"

@@ -5,8 +5,8 @@ Isaac Lab + rsl_rl で学習させるタスク。最終的には床の箱を拾�
 
 | | |
 |---|---|
-| 実装 | `mdp/rewards.py` (1214 行 / 53 関数 = 公開 44 + 内部ヘルパー 9) |
-| 設定 | `robots/g1/29dof/squat_only_env_cfg.py` (392 行) |
+| 実装 | `mdp/rewards.py` (958 行 / 35 関数 = 公開 26 + 内部ヘルパー 9) |
+| 設定 | `robots/g1/29dof/squat_only_env_cfg.py` (425 行) |
 | 周期 | 6.0 秒 (3 秒で沈み、3 秒で立つ) |
 | 配点 | 正報酬 最大 39.0 / ペナルティ 最小 −29.0 |
 | 棒立ちの得点 | 1 step 4.15 / 完璧 27.97（比 6.7 倍） |
@@ -40,8 +40,6 @@ Isaac Lab + rsl_rl で学習させるタスク。最終的には床の箱を拾�
 |---|---|
 | `Unitree-G1-29dof-PeriodicSquat` | 周期スクワット学習（現在の主タスク） |
 | `Unitree-G1-29dof-PeriodicSquat-Play` | 同・可視化用（16 env） |
-| `Unitree-G1-29dof-PickupCarry` | 箱の pick & carry（7 フェーズ・未着手） |
-| `Unitree-G1-29dof-PickupCarry-Play` | 同・可視化用 |
 | `Unitree-G1-29dof-SquatStandLift` | しゃがみ→箱把持→立ち上がりの単発動作（別パッケージ `squat_stand_lift/`） |
 
 ```bash
@@ -67,40 +65,46 @@ python scripts/rsl_rl/play.py --task Unitree-G1-29dof-PeriodicSquat-Play --num_e
 | ファイル | 行数 | 状態 | 内容 |
 |---|---:|---|---|
 | `README.md` | — | 追加 | このドキュメント |
-| `mdp/rewards.py` | 1214 | 追加 | 全報酬関数（53） |
-| `mdp/rewards.py.bak` | 1140 | 一時 | 未使用関数削除前のバックアップ。不要なら削除可 |
-| `mdp/observations.py` | 101 | 追加 | 箱の相対位置、手の位置、位相観測 |
-| `mdp/events.py` | 55 | 追加 | 箱のリセット |
+| `mdp/rewards.py` | 958 | 追加 | 全報酬関数（35） |
+| `mdp/observations.py` | 21 | 追加 | 位相観測のみ |
+| `mdp/events.py` | 8 | 追加 | 独自イベントなし（スタブ） |
 | `mdp/__init__.py` | 15 | 追加 | Isaac Lab / locomotion の mdp を再エクスポート |
-| `robots/g1/29dof/squat_only_env_cfg.py` | 392 | 追加 | **周期スクワットの環境設定（主戦場）** |
-| `robots/g1/29dof/pickup_carry_env_cfg.py` | 340 | 追加 | 箱タスクの環境設定 |
-| `robots/g1/29dof/__init__.py` | 48 | 追加 | gym 登録（4 タスク） |
-| `agents/rsl_rl_ppo_cfg.py` | 38 | 追加 | PPO 設定 |
+| `robots/g1/29dof/base_env_cfg.py` | 196 | 追加 | シーン / 行動 / 観測 / イベント / 終了の基底 |
+| `robots/g1/29dof/squat_only_env_cfg.py` | 425 | 追加 | **周期スクワットの報酬と定数（主戦場）** |
+| `robots/g1/29dof/__init__.py` | 29 | 追加 | gym 登録（2 タスク） |
+| `agents/rsl_rl_ppo_cfg.py` | 45 | 追加 | PPO 設定 |
 
 `mdp/__init__.py` が `from .rewards import *` しているので、`rewards.py` に関数を
 足すだけで `mdp.xxx` として参照できる。
 
-### このパッケージは共有 MDP ライブラリでもある
+### このパッケージは自己完結している
 
-`tasks/squat_stand_lift/` が `mdp` と `agents` をここから re-export して使っている。
+以前は `tasks/squat_stand_lift/` が `mdp` をここから re-export していたが、
+現在は向こうが独自の複製（`squat_stand_lift/mdp/rewards.py` 1116 行）を持っており、
+**squat_only を import しているファイルはリポジトリ内に 1 つも無い**。
 
-```python
-# squat_stand_lift/mdp/__init__.py
-from unitree_rl_lab.tasks.squat_only.mdp import *
+```bash
+# 確認コマンド
+grep -rn "tasks.squat_only" --include="*.py" source/ | grep -v "^.*/squat_only/"
 ```
 
-**`rewards.py` の関数を削除・改名するときは `squat_stand_lift/` 側の参照も確認する。**
+したがって `mdp/` の関数は squat_only 内の参照だけ見て安全に削除・改名できる。
 
 ### 名前について
 
-パッケージ名は 08-28 に `pickup_carry` → `squat_only` へ変更した。
-次の 3 つは意図的に旧名のまま残している。
+パッケージ名は 08-28 に `pickup_carry` → `squat_only` へ変更し、
+同日に箱タスク一式を削除した（`_to_delete/` に退避）。旧名は残っていない。
 
-| 対象 | 旧名を維持する理由 |
+| 旧 | 新 |
 |---|---|
-| `pickup_carry_env_cfg.py` | 箱タスクの設定ファイルであり、名前が実態と一致している |
-| `G1PickupCarryEnvCfg` / `G1PickupCarryPPORunnerCfg` | 同上。クラス名の変更は影響範囲が広い |
-| `experiment_name = "g1_pickup_carry"` | ログ出力先 `logs/rsl_rl/g1_pickup_carry/`。変えると既存の run から resume できなくなる |
+| `pickup_carry_env_cfg.py` の基底部分 | `base_env_cfg.py`（箱を含まない） |
+| `G1PickupCarryEnvCfg` | `G1SquatBaseEnvCfg` |
+| `G1PickupCarryPPORunnerCfg` | `G1SquatBasePPORunnerCfg` |
+| `PickupSceneCfg` | `SquatSceneCfg`（`box` を削除） |
+
+学習ログの出力先は `G1PeriodicSquatPPORunnerCfg` が
+`experiment_name = "squat_only"` を上書きしているので従来どおり
+`logs/rsl_rl/squat_only/`。
 
 ---
 
@@ -176,8 +180,20 @@ target = stand_value + (squat_value - stand_value) * depth
 | `HEIGHT` | 0.73 | 0.39 | — | 骨盤高 [m] |
 | `TORSO_PITCH` | 0.00 | 0.65 | — | 前傾 37 度 |
 | `ARM_FWD` | 0.00 | 0.95 | — | 上腕の前方成分（world・鉛直から 72 度） |
+
+`SHOULDER_PITCH` を -0.80 にすると、完全しゃがみ（胴の前傾 37 度）での上腕は
+**水平より 4.2 度上**を向く＝胸の高さで真っ直ぐ前方。
+
+| `SQUAT_SHOULDER_PITCH` | 局所の前方角 | 胴の前傾込み | 前方成分 | 水平から |
+|---:|---:|---:|---:|---:|
+| -0.45（旧） | 36.9° | 74.1° | 0.962 | -15.9° |
+| **-0.80（現）** | **56.9°** | **94.2°** | **0.997** | **+4.2°** |
+| -1.00 | 68.4° | 105.6° | 0.963 | +15.6° |
+
+`ARM_FWD`=0.95 に対し実際は 0.997 になるので `arm_forward` の上限は満点の 97.5%。
+2 つの腕の項がわずかに引き合うが実害は無い範囲。
 | `ARM_FWD_MIN` | — | 0.85 | — | 下回ると大幅減点 |
-| `SHOULDER_PITCH` | 0.20 | **-0.45** | -2.78 | **負が前方**。0.194 で真下 |
+| `SHOULDER_PITCH` | 0.20 | **-0.80** | -2.78 | **負が前方**。0.194 で真下 |
 | `ELBOW` | 0.97 | **1.25** | 1.94 | **1.276 で完全伸展**（0 は 73 度曲がった姿勢） |
 | `ABDUCTION` | 0.00 | 0.18 | — | \|hip_roll\| 許容量 |
 | `WIDTH` | 0.20 | 0.28 | — | 足の左右間隔 [m] |
@@ -216,8 +232,10 @@ target = stand_value + (squat_value - stand_value) * depth
 | +0.30 | 6.1 度 後ろ | 0.517 |
 | **+0.194** | **真下** | 0.600 |
 | 0.00 | 11.1 度 前 | 0.747 |
-| **-0.45** | **36.9 度 前** | **0.962** |
+| -0.45 | 36.9 度 前 | 0.962 |
 | -0.60 | 45.5 度 前 | 0.992 |
+| **-0.80** | **56.9 度 前** | **0.997**（水平より 4.2 度上） |
+| -1.00 | 68.4 度 前 | 0.963（水平より 15.6 度上・行き過ぎ） |
 
 ### elbow — 0 は「曲がった」姿勢
 
@@ -276,9 +294,9 @@ target = stand_value + (squat_value - stand_value) * depth
 | `waist_pitch_pen` | `waist_pitch_penalty` | 4.0 | 0.12 | 腰から上だけの反り |
 | `arm_ext_pen` | `arm_extension_penalty` | 1.5 | 0.10 | 肘の曲がり `d` |
 | `wrist_pen` | `wrist_neutral_penalty` | 1.5 | 0.25 | 手首のひねり `d` |
-| `drift_pen` | `drift_penalty` | 1.0 | 0.25 | 水平ドリフト |
+| `drift_pen` | `drift_penalty` | 3.0 | 0.60 | 水平ドリフト |
 | `slip_pen` | `feet_slip_penalty` | 1.0 | 0.30 | 足の滑り |
-| `hands_sym_pen` | `hands_symmetry_penalty` | 0.5 | 0.10 | 手の左右非対称 |
+| `hands_sym_pen` | `hands_symmetry_penalty` | 1.0 | 0.20 | 手の左右非対称 |
 | `torso_roll_pen` | `torso_roll_penalty` | 1.0 | 0.25 | 胴の左右傾き |
 | `heading_pen` | `heading_penalty` | 2.0 | — | ヨー方向のずれ（向き） |
 | `yaw_rate_pen` | `yaw_rate_penalty` | 2.0 | 0.50 | その場回転（角速度）|
@@ -290,7 +308,7 @@ target = stand_value + (squat_value - stand_value) * depth
 |---|---|---:|---|
 | `dof_pos_lim` | `joint_pos_limits` | -1.0 | 参照姿勢が関節限界に食い込むと発火。異常検知に有用 |
 | `ang_vel_xy` | `ang_vel_xy_l2` | -0.02 | |
-| `action_rate` | `action_rate_l2` | -0.005 | |
+| `action_rate` | `action_rate_l2` | -0.015 | 振動抑制。落とし穴 18 |
 | `joint_torque` | `joint_torques_l2` | -1.0e-6 | |
 | `joint_acc` | `joint_acc_l2` | -2.5e-7 | |
 
@@ -531,19 +549,6 @@ straightness = ||肩->手|| / (||肩->肘|| + ||肘->手||)
 | `_bodies_in_yaw_frame` | (N,K,3) | 骨盤原点・ヨーのみ揃えた座標系。「前」が胴の前傾によらず水平前方を指す |
 | `_sorted_by_lateral` | (N,2,3) | y 座標で並べ替え、左右の対応付けを保証 |
 
-### 箱タスク専用（`pickup_carry_env_cfg.py` から参照・削除禁止）
-
-| 関数 | フェーズ |
-|---|---|
-| `approach_box` / `face_box` | 1-2 箱へ接近し正対する |
-| `squat_when_near_box` / `knee_flexion_when_squatting` | 3 箱の近くでしゃがむ |
-| `hands_near_box` / `hands_contact_box` | 4 両手を箱へ |
-| `is_grasped` / `grasp_bonus` | 5 掴む |
-| `lift_box` / `stand_up_when_lifting` | 6 持ち上げて立つ |
-| `carry_box_velocity` | 7 運ぶ |
-| `drop_box_penalty` / `box_collision_penalty` | 安全 |
-| `hip_abduction_penalty` / `feet_lateral_distance_penalty` / `leg_symmetry_penalty` | 開脚抑制（旧版） |
-
 ---
 
 ## 落とし穴
@@ -753,6 +758,93 @@ TensorBoard の読み方（700 iteration 時点）:
 **あわせて**: 片側ペナルティの σ は「最悪時に飽和しない」広さにする。
 `arm_shortfall_pen` は σ0.60 で最深部の勾配が -0.635 まで落ちていた（σ0.80 で -0.859）。
 
+### 16. 報酬より先に「アクションで目標に届くか」を確認する
+
+親の `G1PickupCarryEnvCfg` は `JointPositionActionCfg(scale=0.25, use_default_offset=True)`。
+つまり **目標関節角 = default + 0.25 × action**。
+
+方策のアクション標準偏差は `Loss/entropy` から逆算できる（29 次元対角ガウス）:
+
+```
+σ = exp(entropy/N - 0.5*ln(2πe))
+entropy 32.74 -> σ = 0.748  -> 探索が届くのは a = ±3σ ≈ ±2.2
+```
+
+必要な action:
+
+| 関節 | default | 目標 | 必要な a | 届く? |
+|---|---:|---:|---:|:--|
+| hip_pitch | -0.10 | -2.10 | **-8.0** | ✗ |
+| knee | 0.30 | 2.20 | **+7.6** | ✗ |
+| ankle_pitch | -0.20 | -0.75 | -2.2 | △ |
+| shoulder_pitch | 0.20 | -0.80 | **-4.0** | ✗ |
+| elbow | 0.97 | 1.25 | +1.1 | ○ |
+
+探索で届く膝の最大は **0.86 rad = 49 度**。これがそのまま「中腰で止まる」の正体で、
+`GATE_KNEE`=1.20 にすら届かないので腕の報酬もほとんど開かなかった。
+報酬をいくら調整しても解決しない **物理的な壁**。
+
+**対処**: 可動域が大きい関節だけスケールを上げ、必要な action を ±2 以内に収める。
+0 付近に留めたい関節（hip_roll / waist / wrist）は 0.25 のままにして
+制御を粗くしない。
+
+**dict の落とし穴**: `scale` に dict を渡すと **マッチしなかった関節は 1.0** になる
+（`torch.ones` 初期化）。`".*"` のような catch-all は他のパターンと二重マッチして
+`resolve_matching_names_values` が例外を投げるので使えない。
+**29 関節すべてを明示列挙すること。**
+
+**判定手順**: 新しい参照姿勢を決めたら、必ず
+`(目標 - default) / scale` を全関節で計算し、`3σ`（entropy から逆算）と比べる。
+
+### 17. 使わないタスクの観測が残っていると方策の入力が汚れる
+
+`squat_only` は箱タスクの `G1PickupCarryEnvCfg` を継承していたため、
+**箱がシーンに存在し、その位置と手の接触フラグが方策の観測に入っていた**。
+
+```
+box_rel / box_dist_heading / box_in_hands / hand_touch / hand_pos
+```
+
+スクワットには一切関係しない次元で、常に同じ値（箱は動かない）か、
+方策が制御できないノイズにしかならない。
+
+箱タスクの削除にあたって基底を `base_env_cfg.py` に切り出し、
+シーンの `box`・箱の観測・`reset_box` イベントをすべて外した。
+手先位置と手の接触も箱タスク用だったので削除（肩・肘の角度は `joint_pos`
+に含まれるので方策側で復元できる）。
+
+**観測次元が変わるので既存のチェックポイントとは互換性が無い。**
+
+**一般則**: 基底クラスを他タスクから継承するときは、
+`scene` / `observations` / `events` に相手のタスク専用要素が混ざっていないか
+必ず確認する。報酬は上書きしても、この 3 つは黙って継承される。
+
+### 18. アクションスケールを上げたら探索ノイズも下げる
+
+関節目標のノイズは **`scale × init_noise_std`**。落とし穴 16 で scale を
+0.25 → 1.0 にしたとき `init_noise_std=0.8` を据え置いたため、
+膝の目標が **σ 0.80 rad = 46 度**で暴れ、ロボットがよろけて前進した。
+
+| 設定 | 膝の目標ノイズ |
+|---|---:|
+| scale 0.25 × std 0.8（元）| 0.20 rad = 11° |
+| scale 1.00 × std 0.8（落とし穴 16 の直後）| **0.80 rad = 46°** |
+| scale 0.80 × std 0.35（現）| 0.28 rad = 16° |
+
+TensorBoard から実際の物理量は逆算できる:
+
+| 指標 | 値 | 逆算 |
+|---|---:|---|
+| `action_rate` | -1.55 | `l2 = 1.55/0.005 = 310` → 1 関節 Δa_rms **3.3 /step**（バンバン振動）|
+| `drift_pen` | -0.94 | `σ√(-ln(1+r/w))` → **42 cm** ドリフト、σ0.25 では飽和で勾配ゼロ |
+| `hands_sym_pen` | -0.46 | 左右の非対称 **16 cm**、σ0.10 で飽和 |
+| `dof_pos_lim` | -0.83 | 関節限界の超過量 0.83 rad（健全は 0.1 以下）|
+| `grounded` | 2.0 / 3.0 | 両足接地は **67%** の時間だけ |
+
+**一般則**: スケールを N 倍にしたら `init_noise_std` を 1/N 前後にする。
+そのうえで**飽和しているペナルティは σ を広げてから重みを上げる** —
+飽和した項は勾配が 0 なので、重みだけ上げても方策は直しようがない。
+
 ---
 
 ## 学習時に見る指標
@@ -762,7 +854,10 @@ TensorBoard の読み方（700 iteration 時点）:
 | 指標 | 健全 | 異常時の意味 |
 |---|---|---|
 | `Loss/learning_rate` | 1e-4 以上 | **下限張り付き → 即停止**。落とし穴 10 |
-| `Loss/entropy` | 単調減少 | 横ばい → 何も学習していない |
+| `Episode_Reward/action_rate` | -0.5 以上 | -1.0 以下 → 振動。scale とノイズを見直す（落とし穴 18）|
+| `Episode_Reward/drift_pen` | -0.5 以上 | 重み × -1 に張り付き → 飽和して勾配が無い。σ を広げる |
+| `Episode_Reward/grounded` | 満点に近い | 2/3 以下 → 片足が浮いている＝よろけている |
+| `Loss/entropy` | 単調減少 | 横ばい → 何も学習していない。`σ=exp(H/29-1.419)` で探索幅を出し、必要な action と比べる（落とし穴 16）|
 | `Episode_Reward/dof_pos_lim` | -0.1 以上 | -0.5 以下 → 参照姿勢が関節限界に食い込んでいる |
 
 動作ごと:
@@ -792,6 +887,10 @@ TensorBoard の読み方（700 iteration 時点）:
 
 | 日付 | 変更 | 理由 |
 |---|---|---|
+| 08-31 | `init_noise_std` 0.8 → **0.35**、hip_pitch/knee のスケール 1.0 → **0.8**、`action_rate` -0.005 → **-0.015**、`drift_pen` w1.0/σ0.25 → **w3.0/σ0.60**、`hands_sym_pen` w0.5/σ0.10 → **w1.0/σ0.20** | 落とし穴 16 でスケールを 4 倍にしたのにノイズを据え置いたため、膝の目標が 46 度で暴れ、よろけて 42 cm ドリフトしていた（落とし穴 18）。`drift_pen` と `hands_sym_pen` は σ が狭くて飽和し勾配ゼロだったので σ を広げてから重みを上げた。腕は改善済み（`arm_shortfall_pen` -0.87 → -0.19、`arm_pose_coarse` 0.02 → 1.65）|
+| 08-28 | **箱タスク（pickup_carry）を全削除**。基底を `base_env_cfg.py` （`G1SquatBaseEnvCfg`）に切り出し、シーンの `box`・箱の観測・`reset_box` を除去。`mdp` から箱専用の 24 関数を削除（rewards 53→35、observations 6→1、events 1→0）。gym 登録 `PickupCarry` 2 件を削除 | 使っていないうえ、継承経由で箱がシーンに存在し観測にも入り込んでいた（落とし穴 17）。到達可能性の推移閉包で判定し、squat_only を import している外部ファイルが 0 件であることを確認してから削除 |
+| 08-28 | `SQUAT_SHOULDER_PITCH` -0.45 → **-0.80**（ユーザー変更）。追従して `.*_shoulder_pitch_joint` のアクションスケールを 0.5 → 0.6 | 完全しゃがみでの上腕が水平より 4.2 度上＝胸の高さで真っ直ぐ前方になる。scale 0.5 のままだと必要 action が -2.0 で探索幅 3σ≈2.2 の縁に張り付くため、0.6 にして -1.67 に収めた（落とし穴 16）|
+| 08-28 | **アクションスケールを関節ごとに設定**（hip_pitch/knee 1.0、ankle_pitch/shoulder_pitch/elbow 0.5、他 0.25）| 親の `scale=0.25` では膝の目標 2.20 rad に action 7.6 が必要で、方策の探索幅 ±3σ≈±2.2 では **物理的に届かなかった**（落とし穴 16）。届く膝の最大が 0.86 rad = 49 度 = そのまま「中腰」。膝ゲート 1.20 にも届かないので腕の報酬も開かず、手が下がったまま膝に干渉していた。報酬側の問題ではなかった |
 | 08-28 | `_knee_gate` に下限 `gate_min=0.30` を追加。`arm_shortfall_pen` weight 2.0→4.0・σ0.60→0.80 | 膝ゲートを完全に閉じた結果、脚が出来るまでの数百 iteration 腕に勾配が入らず、`action_rate` に引かれて腕が静止したまま固まった（落とし穴 15）。`arm_shortfall_pen` は理論最大 -0.866 に張り付き、σ が狭くて勾配も弱かった。結果: 腕だけ 7.57 < 半分しゃがみ 13.56 < 脚のみ 18.20 < 完璧 28.40 |
 | 08-28 | `torso_backlean_penalty`（3.0 / margin 0.10 / σ0.15）を新設。`waist_pitch_pen` を 2.0→4.0 に戻す | `torso_pitch_tracking` は `_relative_track` の `clamp(min=0)` により、反っても 0 点止まりで**無罰**だった（落とし穴 14）。しゃがんで腕を前に出すと重心が前へ移るため、方策が上体を反らして相殺していた。結果: しゃがみ+反り20度 23.10 < 完璧 27.97（4.9 点の損）、直立・前傾は無罰のまま |
 | 08-28 | **腕の正報酬に膝ゲート `_knee_gate` を導入**（`arm_pose_*` / `arm_forward` / `hands_width`）。`yaw_rate_penalty`（2.0）を新設、`heading_pen` 0.5→2.0。`pose_coarse` σ0.85→1.80・weight 4→5、`height` σ0.16→0.24、`torso` σ0.20→0.40。`squat_shortfall_pen` 1.5→3.0、`upright`/`grounded` 2.0→3.0 | 腕は転倒リスク無しで脚と同じ点が取れるため、方策が「立ったまま腕だけ伸ばしてその場で回る」で収束した（落とし穴 13）。回転は `ang_vel_xy_l2` が z を見ておらず無罰だったため。結果: 腕だけ 4.45 ≒ 棒立ち 4.15、回転 0.83（損）、半分 12.90 / 完璧 27.97 |
