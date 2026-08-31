@@ -1,16 +1,12 @@
 # PeriodicSquat タスク
 
 Unitree G1 29DOF に「その場で立ち ↔ 完全しゃがみを周期的に繰り返す」動作を
-学習させる env。腕は**肩の高さで前へ伸ばした姿勢に固定**し、学習対象から外す。
-将来の箱 pick & carry への足がかり。
-
+学習させる env。
 - タスク ID : `Unitree-G1-29dof-PeriodicSquat` / `-Play`
-- env cfg   : `robots/g1/29dof/squat_only_env_cfg.py`（**環境はこの 1 ファイルで完結**）
-- 設計の根拠 : `DESIGN_NOTES.md`（設計原則・落とし穴 19 件・変更履歴）
+- env cfg   : `robots/g1/29dof/squat_only_env_cfg.py`
 
-> **保守ルール**: 報酬関数・定数・環境設定を変更したら、同じ作業の中で
-> この README（配点表・参照姿勢・冒頭サマリ）と `DESIGN_NOTES.md` の
-> 変更履歴を必ず更新する。
+
+
 
 ---
 
@@ -18,51 +14,22 @@ Unitree G1 29DOF に「その場で立ち ↔ 完全しゃがみを周期的に�
 
 ```
 squat_only/
-├── __init__.py                              パッケージ docstring のみ
-├── README.md                                このファイル（仕様）
-├── DESIGN_NOTES.md                          設計原則・落とし穴・変更履歴
+├── __init__.py                              
+├── README.md                                
 ├── agents/
 │   ├── __init__.py
-│   └── rsl_rl_ppo_cfg.py              48    G1SquatBasePPORunnerCfg
+│   └── rsl_rl_ppo_cfg.py                  G1SquatBasePPORunnerCfg
 │                                            G1PeriodicSquatPPORunnerCfg
 ├── mdp/
-│   ├── __init__.py                    15    Isaac Lab / locomotion の mdp を再エクスポート
-│   ├── events.py                       1    独自イベントなし（スタブ）
-│   ├── observations.py                19    squat_phase_obs のみ
-│   └── rewards.py                    581    報酬関数 37（公開 28 + 内部ヘルパー 9）
+│   ├── __init__.py                       Isaac Lab / locomotion の mdp を再エクスポート
+│   ├── events.py                    
+│   ├── observations.py                
+│   └── rewards.py                    
 └── robots/
     └── g1/29dof/
-        ├── __init__.py                29    gym.register（2 タスク）
-        └── squat_only_env_cfg.py     542    シーン/行動/観測/イベント/報酬/終了/定数
+        ├── __init__.py                   gym.register（
+        └── squat_only_env_cfg.py    
 ```
-
-### この環境を作るために変更したファイル
-
-| ファイル | 変更 | 内容 |
-|---|---|---|
-| `tasks/squat_only/` 一式 | **新規** | 本タスク。`tasks/pickup_carry/` をリネームし、箱タスクを削除して再構成 |
-| `assets/robots/unitree.py` | 修正 | `UNITREE_MODEL_DIR` を環境変数から取るように（USD の置き場所のみ。**ロボットの初期姿勢・アクチュエータ定数は未変更**）|
-
-`tasks/squat_stand_lift/` と `tasks/manipulation/` は**別タスク**で、この env とは
-コードを共有していない（`squat_only` を import しているファイルはリポジトリ内に 0 件）。
-
-```bash
-# 依存が閉じていることの確認
-grep -rn "tasks.squat_only" --include="*.py" source/ | grep -v "/squat_only/"
-```
-
-### 削除したもの（`_to_delete/` に退避）
-
-| ファイル | 理由 |
-|---|---|
-| `pickup_carry_env_cfg.py` | 箱タスク。未使用のうえ、継承経由で箱がシーンに存在し観測にも混入していた |
-| `base_env_cfg.py` | 基底を切り出したが参照タスクが 1 つだけだったので env cfg に統合 |
-| `mdp/rewards.py.bak` | 関数削除前のバックアップ |
-
-`mdp` からは箱専用の 24 関数（rewards 18 / observations 5 / events 1）を削除した。
-到達可能性の推移閉包で判定し、孤児関数 0 件を確認済み。
-
----
 
 ## 動作
 
@@ -91,8 +58,6 @@ phi=1.0  depth=0.0  立ちに戻る
 | hip_roll 許容 | 0.00 | 0.18 | — | rad、片側許容 |
 | 足幅        |  0.20 |  0.28 | — | m、片側許容 |
 
-重心（運動学の検算・腕を前に固定した状態）: COM_x +0.066 m /
-踵まで 0.126 m / つま先まで 0.084 m。導出は `DESIGN_NOTES.md`。
 
 ### 腕（固定・学習対象外）
 
@@ -101,9 +66,6 @@ phi=1.0  depth=0.0  立ちに戻る
 | shoulder_pitch | **-1.6236** | 幾何 -1.4911 − 自重たわみ 0.1325 |
 | elbow          | **1.4668**  | 幾何 +1.4368 + 自重たわみ 0.0300 |
 | shoulder_roll / yaw, wrist_* | 0.0 | 元の ±0.25 / ±0.15 を 0 に |
-
-`use_default_offset=True` なのでこれが action 0 の姿勢。実際に落ち着く位置は
-**手先が肩と同じ高さ・前方 0.382 m**（たわみ補償込み、誤差 0.0 mm）。
 
 ---
 
@@ -118,8 +80,6 @@ phi=1.0  depth=0.0  立ちに戻る
 | ankle_pitch    | 0.5  | -1.1 |
 | その他 25 関節 | 0.25 | 0 付近を維持 |
 
-一律 0.25 だと膝に action 7.6 が必要で探索幅 3σ≈2.2 では届かない。
-上げすぎると探索ノイズ（`scale × init_noise_std`）も比例して増える。
 
 ---
 
@@ -136,7 +96,6 @@ policy / critic 両方に同じ項。policy には Isaac Lab の標準ノイズ�
 | actions             | 前ステップの行動 |
 | squat_phase         | `(sin 2π phi, cos 2π phi)` |
 
-箱タスク由来の `box_*` / `hand_pos` / `hand_touch` は削除済み。
 
 ---
 
@@ -211,9 +170,8 @@ policy / critic 両方に同じ項。policy には Isaac Lab の標準ノイズ�
 
 ---
 
-## 関節の役割（29/29 に必ず割り当てる）
+## 関節の役割
 
-無拘束の関節は方策の「逃げ道」になる（`DESIGN_NOTES.md` 落とし穴 19）。
 
 | 役割 | 関節 | 担当 |
 |---|---|---|
@@ -232,8 +190,6 @@ policy / critic 両方に同じ項。policy には Isaac Lab の標準ノイズ�
 | time_out  | `time_out`                  | `episode_length_s = 12.0` | 通常の終了（2 周期）|
 | fell_over | `bad_orientation`           | limit_angle = 1.2 | 約 69 度傾いたら終了 |
 | collapsed | `root_height_below_minimum` | 0.20 m | 骨盤沈み込みで終了 |
-
-`base_contact` は無効化（`None`）。深いしゃがみでの偶発的な骨盤接触を許すため。
 
 ---
 
@@ -279,29 +235,3 @@ python scripts/rsl_rl/play.py \
 ```
 
 ---
-
-## 学習時に見る指標
-
-まず最初に見るもの:
-
-| 指標 | 健全 | 異常時の意味 |
-|---|---|---|
-| `Loss/learning_rate` | 1e-4 以上 | 下限 1e-5 に張り付き → 即停止。報酬地形が荒い |
-| `Loss/entropy` | 単調減少 | 横ばい → 何も学習していない |
-| `Episode_Reward/dof_pos_lim` | -0.1 以上 | -0.5 以下 → 参照姿勢が関節限界に食い込んでいる |
-
-動作ごと:
-
-| 指標 | 健全 | 異常時の意味 |
-|---|---|---|
-| `pose_fine` | 上昇し続ける | 頭打ち → 参照姿勢が不安定 |
-| `torso_pitch` | 2.4 以上 / 3.0 | 低い → 前傾できず重心が後ろのまま |
-| `squat_shortfall_pen` | -0.3 以上 | -1.2 付近で張り付き → 棒立ちのまま |
-| `action_rate` | -0.5 以上 | -1.0 以下 → 振動。scale とノイズを見直す |
-| `drift_pen` | -0.5 以上 | 重み × -1 に張り付き → 飽和して勾配が無い |
-| `grounded` | 満点に近い | 2/3 以下 → 片足が浮いている＝よろけている |
-| `arm_hold_pen` | -0.5 以上 | -2.0 以下 → 腕が固定姿勢から外れている |
-| `knee_lateral_pen` / `feet_lateral_pen` | -0.3 以上 | -1.5 以下 → 左右どちらかに寄っている |
-| `backlean_pen` | -0.3 以上 | -1.5 以下 → 体を後ろに反らしている |
-| `yaw_rate_pen` | -0.2 以上 | -1.0 以下 → その場回転している |
-| `Episode_Termination/fell_over` | 減少傾向 | 4 割超 → 深さが物理的に無理 |
