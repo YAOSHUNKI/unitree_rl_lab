@@ -81,11 +81,20 @@ STAND_HEIGHT, SQUAT_HEIGHT = 0.73, 0.39
 # 腕の動作は学習が難しく脚の学習も阻害したため、**初期姿勢で固定**する方針に変更した。
 # 立ち姿勢で上腕が水平前方・肘が伸びきった「肩の高さで前へ伸ばした」形。
 #
-# shoulder_pitch は 0.194 で上腕が真下 (MuJoCo モデルから実測)。
-# 水平前方は 90 度先なので 0.194 - pi/2 = -1.377。
-# elbow は 1.276 で完全伸展 (0 は 73 度曲がった姿勢)。
-ARM_SHOULDER_PITCH = -1.377   # 上腕が水平前方 (soft 限界 -2.801 の内側)
-ARM_ELBOW          =  1.276   # 完全伸展       (soft 限界 +1.937 の内側)
+# MuJoCo モデルから、shoulder_pitch 関節の原点を基準に実測した:
+#   肩pitch関節 -> 肘   (0.0158, 0.0442, -0.1975)  長さ 0.203 m
+#   肘 -> 手先(wrist_yaw) (0.1840, 0.0019, -0.0100)  長さ 0.184 m
+#   -> 上腕が真下を向くのは shoulder_pitch = +0.0797
+#   -> 前腕が上腕と一直線になるのは elbow = +1.4368
+# 腕全体を水平前方にする幾何値は shoulder_pitch -1.4911 / elbow +1.4368。
+#
+# ただし腕の関節は ImplicitActuator (stiffness 40 N*m/rad) で位置制御されるので、
+# 目標をそのまま与えると自重で垂れる:
+#   肩: 片腕 3.52 kg x 肩からの重心 0.1535 m -> 5.30 N*m -> 0.133 rad (7.6 度)
+#   肘: 前腕 0.82 kg x 肘からの重心 0.1487 m -> 1.20 N*m -> 0.030 rad (1.7 度)
+# たわむ分だけ目標を先回りさせて、実際の姿勢が水平になるようにする。
+ARM_SHOULDER_PITCH = -1.6236  # = -1.4911 - 0.1325 (たわみ補償, soft 限界 -2.801 内)
+ARM_ELBOW          =  1.4668  # = +1.4368 + 0.0300 (たわみ補償, soft 限界 +1.937 内)
 #
 # 腕は関節角で固定するので、しゃがんで胴が前傾すると腕も一緒に傾く。
 # 完全しゃがみ (前傾 37 度) では腕は水平から 37 度下向き = 前下方へのリーチ姿勢になり、
@@ -323,10 +332,10 @@ class PeriodicSquatRewardsCfg:
     # 合計を正に保つ床 (転倒判定は終了条件が担当するので小さく)
     # --- 腕は学習させず、初期姿勢 (肩の高さで前方に伸ばした形) を保たせるだけ ---
     # 目標＝デフォルトなので action 0 でそのまま維持される。
-    # margin の範囲ではバランス調整のための微修正を許す。
+    # margin は自重によるたわみ (肩 0.133 rad) を無罰にする幅にしてある。
     arm_hold_pen = RewTerm(
         func=mdp.joint_default_deviation_penalty, weight=4.0,
-        params=dict(margin=0.15, std=0.35, robot_cfg=ARM_HOLD_CFG),
+        params=dict(margin=0.25, std=0.35, robot_cfg=ARM_HOLD_CFG),
     )
     upright = RewTerm(
         func=mdp.upright_bonus, weight=3.0,
@@ -517,7 +526,7 @@ class G1PeriodicSquatEnvCfg(ManagerBasedRLEnvCfg):
                         asset_cfg=SceneEntityCfg("robot")),
         )
 
-        print(f">>> PeriodicSquat v6 (腕は固定): period={SQUAT_PERIOD}s")
+        print(f">>> PeriodicSquat v6 (腕は水平前方で固定): period={SQUAT_PERIOD}s")
         print("    action scale: hip_pitch/knee 0.8, shoulder 0.6, ankle/elbow 0.5, 他 0.25")
         print(f"    knee   {STAND_KNEE} -> {SQUAT_KNEE} rad")
         print(f"    height {STAND_HEIGHT} -> {SQUAT_HEIGHT} m")
