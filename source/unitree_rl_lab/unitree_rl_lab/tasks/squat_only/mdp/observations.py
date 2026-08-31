@@ -1,5 +1,3 @@
-"""周期スクワットタスクの観測項。"""
-
 from __future__ import annotations
 
 from typing import TYPE_CHECKING

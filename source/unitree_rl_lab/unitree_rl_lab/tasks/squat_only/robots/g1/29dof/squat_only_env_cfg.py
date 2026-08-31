@@ -1,38 +1,58 @@
-"""その場スクワット(立ち <-> 完全しゃがみ)の学習環境 v3。
+"""その場スクワット (立ち <-> 完全しゃがみ) の学習環境 v5。
+
+**このファイル 1 つで環境が完結する**（シーン / 行動 / 観測 / イベント /
+報酬 / 終了条件 / 定数）。以前は基底を base_env_cfg.py に分けていたが、
+参照が 1 タスクだけなので統合した。
 
 目標動作:
-  - 膝を限界近くまで曲げきる (knee 2.4 rad ~ 137 度)
-  - しゃがむにつれて両手を左右対称に前へ出す
+  - 膝を限界近くまで曲げきる (knee 0.30 -> 2.20 rad = 126 度)
   - 胴は正面を向いたまま (ヨー・ロールは 0、前傾ピッチのみ許可)
   - その場から動かない
 
-設計原則:
-  1. 正報酬 = タスク達成のみ。定位置保持はペナルティで与える
-     (棒立ちでタダでもらえる報酬を作らない)。
+腕は学習対象外。初期姿勢「肩の高さで前へ伸ばした形」で固定し、
+`arm_hold_pen` がそこから外れた分だけを罰する。腕の動作学習は
+脚の学習まで阻害したため 08-31 に切り離した。
+
+設計・配点・落とし穴の解説は ../../../README.md にまとめてある。
+**報酬関数・定数・環境設定を変更したら、同じ作業の中で README も更新すること。**
+
+要点だけ再掲:
+  1. 正報酬 = タスク達成のみ。追従項は `_relative_track` で
+     「何もしない状態」を 0 点に正規化する (落とし穴 11)。
   2. ペナルティはすべて [-1, 0] に有界。合計が負に振れると
-     エージェントは早期終了(わざと転倒)で return を最大化する。
-  3. 姿勢追従は coarse(広い std) + fine(狭い std) の2段構え。
-     coarse が遠方からの勾配を供給し、fine が精度を要求する。
-  4. 「手を前に出す」は関節角ではなくタスク空間(手の位置)で指定。
-     shoulder_pitch の符号規約に依存しないため。
+     エージェントは早期終了 (わざと転倒) で return を最大化する。
+  3. 姿勢追従は coarse (広い std) + fine (狭い std) の 2 段構え。
+  4. 29 関節すべてに役割を与える。無拘束の関節は逃げ道になる (落とし穴 19)。
+     脚 10 = 参照姿勢 / 開脚抑制、胴 3 + 脚 4 = 0 固定・デフォルト維持、
+     腕 14 = arm_hold_pen で固定。
   5. SceneEntityCfg は必ず RewTerm(params=...) に書く。
-     デフォルト引数に置くと resolve されず全29関節を指してしまう。
+     デフォルト引数に置くと resolve されず全 29 関節を指してしまう。
 """
 
 from __future__ import annotations
 
+import isaaclab.sim as sim_utils
+from isaaclab.assets import AssetBaseCfg
+from isaaclab.envs import ManagerBasedRLEnvCfg
+from isaaclab.managers import EventTermCfg as EventTerm
+from isaaclab.managers import ObservationGroupCfg as ObsGroup
 from isaaclab.managers import ObservationTermCfg as ObsTerm
 from isaaclab.managers import RewardTermCfg as RewTerm
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.managers import TerminationTermCfg as DoneTerm
+from isaaclab.scene import InteractiveSceneCfg
+from isaaclab.sensors import ContactSensorCfg
+from isaaclab.terrains import TerrainImporterCfg
 from isaaclab.utils import configclass
+from isaaclab.utils.noise import AdditiveUniformNoiseCfg as Unoise
 
 import unitree_rl_lab.tasks.squat_only.mdp as mdp
-from .base_env_cfg import (
-    G1SquatBaseEnvCfg,
-    FOOT_BODY_REGEX,
-    HAND_BODY_REGEX,
-)
+from unitree_rl_lab.assets.robots.unitree import UNITREE_G1_29DOF_CFG
+
+# === ボディ名 (USD に合わせて調整) ==========================================
+HAND_BODY_REGEX = ".*_wrist_yaw_link"
+PELVIS_BODY_REGEX = ["pelvis", "torso_link"]
+FOOT_BODY_REGEX = ".*_ankle_roll_link"
 
 # === 周期 ===================================================================
 SQUAT_PERIOD = 6.0        # 秒 / 1周期 (3秒かけて沈み、3秒かけて立つ)
@@ -57,35 +77,29 @@ STAND_ANKLE,     SQUAT_ANKLE     = -0.20, -0.75  # soft 限界 -0.803 に余裕�
 #   knee 2.20 -> 0.39 m  (股関節は足首の 8cm 後ろ。前傾37度で重心を戻す)
 STAND_HEIGHT, SQUAT_HEIGHT = 0.73, 0.39
 
-# === 腕の参照姿勢 ===========================================================
-# 腕の姿勢は次の3つだけで完全に決まる:
-#   1. 向き   arm_forward   (肩 -> 手 の単位ベクトルの前方成分)
-#   2. 伸展   arm_ext_pen   (肩/肘/手 の3点の一直線度)
-#   3. 間隔   hands_width   (左右の手の距離 = 膝幅)
-# いずれもスケールフリーなので、腕の長さや肩の高さを知らなくてよい。
-# 手の「絶対位置」を別途指定すると腕長の推定値に依存し、腕を前に振ると
-# 手が必然的に上がる分だけ arm_forward と逆方向に引っ張り合うので指定しない。
-
-# 上腕(肩->肘)の前方成分。0=真下, 0.95=鉛直から72度前, 1.0=水平前方
-# 0.95 なら腕が伸びていれば手は肩の約11cm下 = 胸の高さに来る。
-# 0.55 では手の到達点が膝とほぼ同座標になり、腕が膝にめり込む。
-STAND_ARM_FWD,  SQUAT_ARM_FWD  = 0.00,  0.95
-
-# 肩・肘の関節目標 (MuJoCo モデル deploy/mujoco_py/g1_model/g1_29dof.xml から実測)
-#   shoulder_pitch: 負が前方。0.194 で真下。-0.45 は前傾37度と合わせて world fwd 0.962
-#   elbow         : 0 は 73 度曲がった姿勢。1.276 で完全伸展 (デフォルト 0.97 は 17.7 度)
-STAND_SHOULDER_PITCH, SQUAT_SHOULDER_PITCH = 0.20, -0.80
-STAND_ELBOW,          SQUAT_ELBOW          = 0.97,  1.25
-ARM_FWD_MIN = 0.85          # これを下回ると arm_shortfall_pen で大幅減点
+# === 腕の姿勢 (固定・学習対象外) =============================================
+# 腕の動作は学習が難しく脚の学習も阻害したため、**初期姿勢で固定**する方針に変更した。
+# 立ち姿勢で上腕が水平前方・肘が伸びきった「肩の高さで前へ伸ばした」形。
+#
+# shoulder_pitch は 0.194 で上腕が真下 (MuJoCo モデルから実測)。
+# 水平前方は 90 度先なので 0.194 - pi/2 = -1.377。
+# elbow は 1.276 で完全伸展 (0 は 73 度曲がった姿勢)。
+ARM_SHOULDER_PITCH = -1.377   # 上腕が水平前方 (soft 限界 -2.801 の内側)
+ARM_ELBOW          =  1.276   # 完全伸展       (soft 限界 +1.937 の内側)
+#
+# 腕は関節角で固定するので、しゃがんで胴が前傾すると腕も一緒に傾く。
+# 完全しゃがみ (前傾 37 度) では腕は水平から 37 度下向き = 前下方へのリーチ姿勢になり、
+# 将来の箱拾いへ素直につながる。
+#
+# 重心への影響: 腕 7.04 kg (全体の 20%) が肩から 0.098 m の位置で前方へ回るので
+# 重心は前へ 2.0 cm 移動する。完全しゃがみでの余裕は
+#   踵まで 0.126 m / つま先まで 0.084 m (前傾 0.65 のままで成立)。
 
 # 胴の前傾 [rad]。股関節が足首の真上に来る条件は knee = 2 x |ankle|。
 # ankle の soft 限界が 0.803 なので、踵接地のまま股関節を足の上に保てるのは
 # knee <= 1.61 まで。それより深いと股関節は必ず後ろへ抜けるので前傾で戻す。
 # 採用値での重心: COM_x +0.046 / 踵余裕 0.106 / つま先余裕 0.104 (ほぼ均衡)
 TORSO_STAND_PITCH, TORSO_SQUAT_PITCH = 0.00, 0.65
-
-HAND_WIDTH_SCALE = 1.0                        # 手の間隔 = 膝の間隔 x これ
-HAND_WIDTH_MIN   = 0.16                       # 立ち位相でも最低これだけ開く [m]
 
 # === 開脚の許容量 ===========================================================
 # 完全に 0 は非現実的 (大腿が水平近くまで来ると胴の入るスペースが要る)。
@@ -108,16 +122,14 @@ HIP_ROLL_CFG  = SceneEntityCfg("robot", joint_names=[".*_hip_roll_joint"])
 FEET_BODY_CFG   = SceneEntityCfg("robot", body_names=[FOOT_BODY_REGEX])
 HAND_BODY_CFG   = SceneEntityCfg("robot", body_names=[HAND_BODY_REGEX])
 KNEE_BODY_CFG   = SceneEntityCfg("robot", body_names=[".*_knee_link"])
-SHOULDER_CFG    = SceneEntityCfg("robot", body_names=[".*_shoulder_yaw_link"])
-ELBOW_CFG       = SceneEntityCfg("robot", body_names=[".*_elbow_link"])
 WAIST_PITCH_CFG = SceneEntityCfg("robot", joint_names=["waist_pitch_joint"])
-WRIST_CFG       = SceneEntityCfg("robot", joint_names=[".*_wrist_.*_joint"])
-SH_PITCH_CFG    = SceneEntityCfg("robot", joint_names=[".*_shoulder_pitch_joint"])
-SH_YAW_CFG      = SceneEntityCfg("robot", joint_names=[".*_shoulder_yaw_joint"])
+# 腕は学習対象から外し、この 14 関節をまとめてデフォルト姿勢に保つ
+ARM_HOLD_CFG    = SceneEntityCfg("robot", joint_names=[
+    ".*_shoulder_pitch_joint", ".*_shoulder_roll_joint", ".*_shoulder_yaw_joint",
+    ".*_elbow_joint", ".*_wrist_.*_joint",
+])
 # 参照姿勢を持たないが放置すると逃げ道になる関節 (落とし穴 19)
-SH_ROLL_CFG     = SceneEntityCfg("robot", joint_names=[".*_shoulder_roll_joint"])
 ANKLE_ROLL_CFG  = SceneEntityCfg("robot", joint_names=[".*_ankle_roll_joint"])
-ELBOW_JOINT_CFG = SceneEntityCfg("robot", joint_names=[".*_elbow_joint"])
 FOOT_SENSOR_CFG = SceneEntityCfg("foot_contact", body_names=[FOOT_BODY_REGEX])
 
 _POSE_PARAMS = dict(
@@ -132,24 +144,149 @@ _POSE_PARAMS = dict(
 )
 
 
-# 腕の正報酬を開ける「膝の曲がり」ゲート。
-# しゃがまずに腕だけ伸ばして稼ぐ局所解を塞ぐ (落とし穴 13)。
-GATE_KNEE = 1.20            # 目標 SQUAT_KNEE=2.20 の約半分で満開
-GATE_MIN  = 0.30            # 立っていても残す最低倍率 (落とし穴 15)
-_GATE_PARAMS = dict(
-    knee_gate_cfg=KNEE_CFG, gate_stand_knee=STAND_KNEE, gate_knee=GATE_KNEE,
-    gate_min=GATE_MIN,
-)
+@configclass
+class SquatSceneCfg(InteractiveSceneCfg):
+    terrain: TerrainImporterCfg = TerrainImporterCfg(
+        prim_path="/World/ground",
+        terrain_type="plane",
+        collision_group=-1,
+        physics_material=sim_utils.RigidBodyMaterialCfg(
+            friction_combine_mode="multiply",
+            restitution_combine_mode="multiply",
+            static_friction=1.0,
+            dynamic_friction=1.0,
+        ),
+    )
 
-_ARM_PARAMS = dict(
-    period=SQUAT_PERIOD,
-    stand_shoulder_pitch=STAND_SHOULDER_PITCH, squat_shoulder_pitch=SQUAT_SHOULDER_PITCH,
-    stand_elbow=STAND_ELBOW,                   squat_elbow=SQUAT_ELBOW,
-    shoulder_pitch_cfg=SH_PITCH_CFG,
-    elbow_cfg=ELBOW_JOINT_CFG,
-    shoulder_yaw_cfg=SH_YAW_CFG,
-    **_GATE_PARAMS,
-)
+    robot = UNITREE_G1_29DOF_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
+
+    foot_contact = ContactSensorCfg(
+        prim_path="{ENV_REGEX_NS}/Robot/" + FOOT_BODY_REGEX,
+        track_air_time=True,
+        history_length=3,
+    )
+    hand_contact = ContactSensorCfg(
+        prim_path="{ENV_REGEX_NS}/Robot/" + HAND_BODY_REGEX,
+        history_length=3,
+    )
+    body_contact = ContactSensorCfg(
+        prim_path="{ENV_REGEX_NS}/Robot/(pelvis|torso_link)",
+        history_length=3,
+    )
+
+    light = AssetBaseCfg(
+        prim_path="/World/Light",
+        spawn=sim_utils.DomeLightCfg(intensity=1500.0, color=(0.9, 0.9, 0.9)),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Commands
+# ---------------------------------------------------------------------------
+
+
+@configclass
+class CommandsCfg:
+    base_velocity = mdp.UniformVelocityCommandCfg(
+        asset_name="robot",
+        resampling_time_range=(8.0, 12.0),
+        rel_standing_envs=0.4,
+        rel_heading_envs=0.5,
+        heading_command=True,
+        debug_vis=False,
+        ranges=mdp.UniformVelocityCommandCfg.Ranges(
+            lin_vel_x=(-0.5, 0.8),
+            lin_vel_y=(-0.3, 0.3),
+            ang_vel_z=(-1.0, 1.0),
+            heading=(-3.14, 3.14),
+        ),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Actions 
+# ---------------------------------------------------------------------------
+
+
+@configclass
+class ActionsCfg:
+    # 目標関節角 = default_joint_pos + scale * action。
+    #
+    # 一律 0.25 だと膝の目標 2.20 rad に必要な action が 7.6 になり、方策の
+    # 探索幅 3σ ≈ 2.2 では物理的に届かず「中腰」で頭打ちになる (落とし穴 16)。
+    # 可動域が大きい関節だけスケールを上げ、必要な action を ±2.5 以内に収める。
+    # 上げすぎると探索ノイズ (= scale * init_noise_std) も比例して増えて
+    # ロボットがよろけるので 0.8 まで (落とし穴 18)。
+    #
+    # NOTE: dict を渡すと「マッチしなかった関節は 1.0」になる。29 関節すべてを
+    #       明示すること。正規表現が二重マッチすると例外が飛ぶ。
+    joint_pos = mdp.JointPositionActionCfg(
+        asset_name="robot",
+        joint_names=[".*"],
+        use_default_offset=True,
+        scale={
+            # 可動域が大きい関節
+            ".*_hip_pitch_joint":      0.8,   # -0.10 -> -2.10 (必要 a = -2.5)
+            ".*_knee_joint":           0.8,   #  0.30 ->  2.20 (必要 a = +2.4)
+            ".*_ankle_pitch_joint":    0.5,   # -0.20 -> -0.75 (必要 a = -1.1)
+            # 腕は固定姿勢を保つだけなので小さく (探索ノイズを減らす)
+            ".*_shoulder_pitch_joint": 0.25,
+            ".*_elbow_joint":          0.25,
+            # 0 付近に留めたい関節
+            ".*_hip_roll_joint":       0.25,
+            ".*_hip_yaw_joint":        0.25,
+            ".*_ankle_roll_joint":     0.25,
+            "waist_yaw_joint":         0.25,
+            "waist_roll_joint":        0.25,
+            "waist_pitch_joint":       0.25,
+            ".*_shoulder_roll_joint":  0.25,
+            ".*_shoulder_yaw_joint":   0.25,
+            ".*_wrist_roll_joint":     0.25,
+            ".*_wrist_pitch_joint":    0.25,
+            ".*_wrist_yaw_joint":      0.25,
+        },
+    )
+
+
+# ---------------------------------------------------------------------------
+# Observations
+# ---------------------------------------------------------------------------
+
+
+@configclass
+class ObservationsCfg:
+    @configclass
+    class PolicyCfg(ObsGroup):
+        base_ang_vel = ObsTerm(func=mdp.base_ang_vel, noise=Unoise(n_min=-0.2, n_max=0.2))
+        projected_gravity = ObsTerm(
+            func=mdp.projected_gravity, noise=Unoise(n_min=-0.05, n_max=0.05)
+        )
+        velocity_commands = ObsTerm(
+            func=mdp.generated_commands, params={"command_name": "base_velocity"}
+        )
+        joint_pos = ObsTerm(func=mdp.joint_pos_rel, noise=Unoise(n_min=-0.01, n_max=0.01))
+        joint_vel = ObsTerm(func=mdp.joint_vel_rel, noise=Unoise(n_min=-1.5, n_max=1.5))
+        actions = ObsTerm(func=mdp.last_action)
+        def __post_init__(self):
+            self.enable_corruption = True
+            self.concatenate_terms = True
+
+    @configclass
+    class CriticCfg(PolicyCfg):
+        pass
+
+    policy: PolicyCfg = PolicyCfg()
+    critic: CriticCfg = CriticCfg()
+
+
+# ---------------------------------------------------------------------------
+# Events
+# ---------------------------------------------------------------------------
+
+
+@configclass
+class EventsCfg:
+    reset_robot = EventTerm(func=mdp.reset_scene_to_default, mode="reset")
 
 
 @configclass
@@ -183,39 +320,14 @@ class PeriodicSquatRewardsCfg:
             robot_cfg=SceneEntityCfg("robot"),
         ),
     )
-    # 腕を前方へ振る (肩関節を動かす動機。位置目標より勾配が素直)
-    # 2段構え。目標を 0.95 まで上げたことで、腕が真下のときの誤差が
-    # 0.95 に達し、狭い std だけでは勾配が完全に消える (1e-28 桁)。
-    # coarse が遠方からの誘導を、fine が精度を担当する。
-    # 肩・肘の関節目標を直接追従 (腕の主報酬)。coarse+fine の2段構え。
-    arm_pose_coarse = RewTerm(
-        func=mdp.arm_pose_tracking, weight=5.0,
-        params=dict(std=0.60, **_ARM_PARAMS),
-    )
-    arm_pose_fine = RewTerm(
-        func=mdp.arm_pose_tracking, weight=8.0,
-        params=dict(std=0.25, **_ARM_PARAMS),
-    )
-    # world 座標での向きの確認 (関節目標だけでは胴の傾き次第で向きがずれる)
-    arm_forward = RewTerm(
-        func=mdp.arm_forward_direction, weight=3.0,
-        params=dict(
-            **_GATE_PARAMS,
-            period=SQUAT_PERIOD, std=0.30,
-            stand_forward=STAND_ARM_FWD, squat_forward=SQUAT_ARM_FWD,
-            shoulder_cfg=SHOULDER_CFG, elbow_cfg=ELBOW_CFG,
-        ),
-    )
-    # 両手の間隔を「膝幅」に合わせる
-    # (これが無いと hands_sym_pen だけでは両手が中央で重なっても満点になる)
-    hands_width = RewTerm(
-        func=mdp.hands_width_match, weight=1.0,
-        params=dict(
-            width_scale=HAND_WIDTH_SCALE, min_width=HAND_WIDTH_MIN, std=0.06,
-            hand_cfg=HAND_BODY_CFG, knee_cfg=KNEE_BODY_CFG, **_GATE_PARAMS,
-        ),
-    )
     # 合計を正に保つ床 (転倒判定は終了条件が担当するので小さく)
+    # --- 腕は学習させず、初期姿勢 (肩の高さで前方に伸ばした形) を保たせるだけ ---
+    # 目標＝デフォルトなので action 0 でそのまま維持される。
+    # margin の範囲ではバランス調整のための微修正を許す。
+    arm_hold_pen = RewTerm(
+        func=mdp.joint_default_deviation_penalty, weight=4.0,
+        params=dict(margin=0.15, std=0.35, robot_cfg=ARM_HOLD_CFG),
+    )
     upright = RewTerm(
         func=mdp.upright_bonus, weight=3.0,
         params=dict(robot_cfg=SceneEntityCfg("robot")),
@@ -235,28 +347,6 @@ class PeriodicSquatRewardsCfg:
         func=mdp.feet_slip_penalty, weight=1.0,
         params=dict(std=0.30, force_threshold=1.0,
                     sensor_cfg=FOOT_SENSOR_CFG, asset_cfg=FEET_BODY_CFG),
-    )
-    # 手が左右非対称だとマイナス (中心が揃っているか。間隔は hands_width が担当)
-    hands_sym_pen = RewTerm(
-        func=mdp.hands_symmetry_penalty, weight=1.0,
-        params=dict(std=0.20, hand_cfg=HAND_BODY_CFG),
-    )
-    # しゃがみ切った時に肘が曲がっていたらマイナス (立ち位相では罰しない)
-    arm_ext_pen = RewTerm(
-        func=mdp.arm_extension_penalty, weight=1.5,
-        params=dict(
-            period=SQUAT_PERIOD, min_straightness=0.97, std=0.10,
-            shoulder_cfg=SHOULDER_CFG, elbow_cfg=ELBOW_CFG, hand_cfg=HAND_BODY_CFG,
-        ),
-    )
-    # しゃがみ切りで腕が前方に出ていなければ大幅減点 (正報酬だけでは
-    # 「取らなくても損しない」ため、必須要件はコスト側にも置く)
-    arm_shortfall_pen = RewTerm(
-        func=mdp.arm_forward_shortfall_penalty, weight=4.0,
-        params=dict(
-            period=SQUAT_PERIOD, min_forward=ARM_FWD_MIN, std=0.80,
-            shoulder_cfg=SHOULDER_CFG, elbow_cfg=ELBOW_CFG,
-        ),
     )
     # しゃがみが浅ければ大幅減点 (腕と同じく必須要件をコスト側にも置く)
     squat_shortfall_pen = RewTerm(
@@ -283,14 +373,6 @@ class PeriodicSquatRewardsCfg:
     waist_pitch_pen = RewTerm(
         func=mdp.waist_pitch_penalty, weight=4.0,
         params=dict(max_abs=0.10, std=0.12, robot_cfg=WAIST_PITCH_CFG),
-    )
-    # 胴が左右に傾いたらマイナス (前傾ピッチは罰しない)
-    # --- 参照姿勢を持たない関節の逃げ道を塞ぐ (落とし穴 19) ---
-    # shoulder_roll は腕を横に開閉する。arm_pose_tracking に入っていないため、
-    # 肩を前に出さずに腕を横→下へ振って hands_width だけ満たす解が成立していた。
-    shoulder_roll_pen = RewTerm(
-        func=mdp.joint_default_deviation_penalty, weight=3.0,
-        params=dict(margin=0.15, std=0.30, robot_cfg=SH_ROLL_CFG),
     )
     # ankle_roll は横方向の連鎖で唯一まったく拘束されていなかった。
     ankle_roll_pen = RewTerm(
@@ -350,23 +432,44 @@ class PeriodicSquatRewardsCfg:
     joint_acc    = RewTerm(func=mdp.joint_acc_l2,      weight=-2.5e-7)
     joint_torque = RewTerm(func=mdp.joint_torques_l2,  weight=-1.0e-6)
     dof_pos_lim  = RewTerm(func=mdp.joint_pos_limits,  weight=-1.0)
-    # 手首を中立に固定。肩の勾配が弱いと方策は手首をひねって
-    # 手先位置の項を満たそうとするので、その逃げ道を塞ぐ。
-    wrist_pen = RewTerm(
-        func=mdp.wrist_neutral_penalty, weight=1.5,
-        params=dict(period=SQUAT_PERIOD, max_abs=0.15, std=0.25, robot_cfg=WRIST_CFG),
-    )
     # 棒立ち   : 約 5.5 / 18.0
     # 正しいスクワット: 約 11.5 / 18.0
     # 開脚スクワット  : 約 6.0  (開脚ペナルティ -5.5 で相殺)
 
 
+# ---------------------------------------------------------------------------
+# Terminations
+# ---------------------------------------------------------------------------
+
+
 @configclass
-class G1PeriodicSquatEnvCfg(G1SquatBaseEnvCfg):
+class TerminationsCfg:
+    time_out = DoneTerm(func=mdp.time_out, time_out=True)
+    base_contact = DoneTerm(
+        func=mdp.illegal_contact,
+        params=dict(
+            sensor_cfg=SceneEntityCfg("body_contact", body_names=PELVIS_BODY_REGEX),
+            threshold=1.0,
+        ),
+    )
+
+
+@configclass
+class G1PeriodicSquatEnvCfg(ManagerBasedRLEnvCfg):
+    scene: SquatSceneCfg = SquatSceneCfg(num_envs=4096, env_spacing=3.0)
+    observations: ObservationsCfg = ObservationsCfg()
+    actions: ActionsCfg = ActionsCfg()
+    commands: CommandsCfg = CommandsCfg()
+    events: EventsCfg = EventsCfg()
     rewards: PeriodicSquatRewardsCfg = PeriodicSquatRewardsCfg()
+    terminations: TerminationsCfg = TerminationsCfg()
 
     def __post_init__(self):
-        super().__post_init__()
+        # --- シミュレーション ---
+        self.decimation = 4
+        self.sim.dt = 0.005                    # 制御 50 Hz
+        self.sim.render_interval = self.decimation
+        self.viewer.eye = (2.5, 2.5, 1.5)
 
         # --- 移動はさせない ---
         self.commands.base_velocity.ranges.lin_vel_x = (0.0, 0.0)
@@ -375,38 +478,6 @@ class G1PeriodicSquatEnvCfg(G1SquatBaseEnvCfg):
         self.commands.base_velocity.rel_standing_envs = 1.0
 
         self.episode_length_s = 12.0   # 2周期
-
-        # --- アクションスケール (落とし穴 16) ---
-        # 親は scale=0.25 / use_default_offset=True なので
-        #   目標関節角 = default + 0.25 * action
-        # 深いスクワットは膝で 1.9 rad 動かす必要があり、必要な action は 7.6。
-        # 方策の探索範囲は ±3σ ≈ ±2.2 しかないので膝は 0.86 rad (49度) で
-        # 頭打ちになる = 「中腰」。肩も -2.6 が必要で届かない。
-        # 大きく動かす関節だけスケールを上げ、必要な action を ±2 以内に収める。
-        #
-        # NOTE: dict を渡すと「マッチしなかった関節は 1.0」になる。
-        #       29 関節すべてを明示すること。正規表現が二重マッチすると
-        #       resolve_matching_names_values が例外を投げる。
-        self.actions.joint_pos.scale = {
-            # 可動域が大きい関節
-            ".*_hip_pitch_joint":      0.8,   # -0.10 -> -2.10 (必要 a = -2.5)
-            ".*_knee_joint":           0.8,   #  0.30 ->  2.20 (必要 a = +2.4)
-            ".*_ankle_pitch_joint":    0.5,   # -0.20 -> -0.75 (必要 a = -1.1)
-            ".*_shoulder_pitch_joint": 0.6,   #  0.20 -> -0.80 (必要 a = -1.67)
-            ".*_elbow_joint":          0.5,   #  0.97 ->  1.25 (必要 a = +0.56)
-            # 0 付近に留めたい関節は従来どおり
-            ".*_hip_roll_joint":       0.25,
-            ".*_hip_yaw_joint":        0.25,
-            ".*_ankle_roll_joint":     0.25,
-            "waist_yaw_joint":         0.25,
-            "waist_roll_joint":        0.25,
-            "waist_pitch_joint":       0.25,
-            ".*_shoulder_roll_joint":  0.25,
-            ".*_shoulder_yaw_joint":   0.25,
-            ".*_wrist_roll_joint":     0.25,
-            ".*_wrist_pitch_joint":    0.25,
-            ".*_wrist_yaw_joint":      0.25,
-        }
 
         # --- 位相観測 (policy が今どの位相か知る必要がある) ---
         self.observations.policy.squat_phase = ObsTerm(
@@ -420,6 +491,17 @@ class G1PeriodicSquatEnvCfg(G1SquatBaseEnvCfg):
         default["right_hip_pitch_joint"] = STAND_HIP_PITCH
         default[".*_knee_joint"]         = STAND_KNEE
         default[".*_ankle_pitch_joint"]  = STAND_ANKLE
+
+        # --- 腕は「肩の高さで前へ伸ばした」姿勢で固定 ---
+        # use_default_offset=True なので、これが action 0 の姿勢になる。
+        # NOTE: UNITREE_G1_29DOF_CFG が持つ既存キーを上書きする。
+        #       新しい正規表現を足すと二重マッチで ValueError になる。
+        default[".*_shoulder_pitch_joint"] = ARM_SHOULDER_PITCH
+        default["left_shoulder_roll_joint"]  = 0.0     # 元 +0.25 (外へ開く)
+        default["right_shoulder_roll_joint"] = 0.0     # 元 -0.25
+        default[".*_elbow_joint"]          = ARM_ELBOW
+        default["left_wrist_roll_joint"]   = 0.0       # 元 +0.15
+        default["right_wrist_roll_joint"]  = 0.0       # 元 -0.15
         self.scene.robot.init_state.joint_pos = default
 
         # --- 転倒は罰ではなく終了で扱う ---
@@ -435,11 +517,11 @@ class G1PeriodicSquatEnvCfg(G1SquatBaseEnvCfg):
                         asset_cfg=SceneEntityCfg("robot")),
         )
 
-        print(f">>> PeriodicSquat v4: period={SQUAT_PERIOD}s")
-        print("    action scale: hip_pitch/knee 1.0, ankle/shoulder/elbow 0.5, 他 0.25")
+        print(f">>> PeriodicSquat v6 (腕は固定): period={SQUAT_PERIOD}s")
+        print("    action scale: hip_pitch/knee 0.8, shoulder 0.6, ankle/elbow 0.5, 他 0.25")
         print(f"    knee   {STAND_KNEE} -> {SQUAT_KNEE} rad")
         print(f"    height {STAND_HEIGHT} -> {SQUAT_HEIGHT} m")
-        print(f"    arm    上腕の前方成分 {STAND_ARM_FWD} -> {SQUAT_ARM_FWD} (下限 {ARM_FWD_MIN})")
+        print(f"    arm    固定 shoulder_pitch={ARM_SHOULDER_PITCH} elbow={ARM_ELBOW} (学習対象外)")
         print(f"    torso  前傾 {TORSO_STAND_PITCH} -> {TORSO_SQUAT_PITCH} rad")
 
 

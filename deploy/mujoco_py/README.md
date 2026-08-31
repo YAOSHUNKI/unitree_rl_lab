@@ -17,11 +17,11 @@ deploy/mujoco_py/
     │   ├── policy.onnx
     │   ├── deploy.yaml
     │   └── task.yaml       # 任意設定
-    ├── velocity/          # ← 歩行(例)
+    ├── velocity/          # ← 歩行
     │   ├── policy.onnx
     │   ├── deploy.yaml
     │   └── task.yaml
-    └── <新タスク>/         # 追加はフォルダを作るだけ
+    └── <新タスク>/         # 追加はフォルダを作成
 ```
 
 ## セットアップ
